@@ -3,7 +3,7 @@
 A GitOps-managed disaster recovery solution for SuiteCRM 8 across multiple OpenShift clusters, orchestrated by Red Hat Advanced Cluster Management (ACM) and OpenShift GitOps (Argo CD).
 
 <p align="center">
-  <img src="/images/logo.jpg" alt="STD Logo" width="250">
+  <img src="/images/logo.png" alt="STD Logo" width="250">
 </p>
 
 
