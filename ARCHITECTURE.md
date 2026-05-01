@@ -144,6 +144,56 @@ See the discussion at the top level of this project history. The summary:
 - Feature parity for our needs (streaming replication, backups, HA, multi-cluster).
 - Not subject to a single vendor's priorities.
 
+## Two-Tier Replication Strategy
+
+The PostgreSQL deployment uses a deliberate two-tier replication design:
+
+### Tier 1: Synchronous (in-cluster, on the active site)
+
+The active cluster runs **2 PostgreSQL instances** with quorum-based synchronous replication (`method: any, number: 1`). Every transaction commit must be acknowledged by at least 1 of the local replicas before returning success to the client.
+
+This gives:
+- **RPO = 0** for AZ-level / worker-node failures
+- **Automatic intra-cluster failover** managed by CNPG (no human action)
+- **No risk of write halt from WAN issues** (the sync requirement is satisfied locally)
+
+CNPG enforces pod anti-affinity by default, so the two instances run on different worker nodes (and ideally different AZs).
+
+### Tier 2: Asynchronous (cross-cluster, to the passive site)
+
+The passive cluster runs as a replica cluster, streaming WAL from the active cluster's primary across the Skupper VAN. This stays **asynchronous** by design.
+
+This gives:
+- **RPO ≈ seconds** for region/cluster-level failures
+- **No write halt if the WAN link or passive cluster degrades** (commits don't block on remote acknowledgment)
+- **Bounded blast radius** for cross-cluster network issues
+
+### Why Not Synchronous Across Clusters?
+
+Synchronous cross-cluster replication is technically possible but undesirable here:
+
+| Concern | Sync cross-cluster | Async cross-cluster (current) |
+|---------|-------------------|------------------------------|
+| RPO during region failure | 0 | ~seconds |
+| Write latency (every commit) | +RTT to passive cluster (~30-100ms) | None |
+| Behavior if WAN link breaks | Writes halt | Writes continue, replication catches up |
+| Behavior if passive cluster is down | Writes halt | Writes continue |
+
+For a CRM workload, the async trade-off is correct: a few seconds of potential data loss in a regional disaster is far better than the risk of WAN issues halting all writes during normal operation.
+
+### Failure Mode Coverage
+
+This two-tier approach covers the realistic failure modes:
+
+| Failure | Tier 1 (sync local) | Tier 2 (async remote) |
+|---------|---------------------|----------------------|
+| Worker node dies | ✓ RPO=0, automatic | (not invoked) |
+| AZ outage in active cluster | ✓ RPO=0, automatic | (not invoked) |
+| Active cluster network blip | ✓ writes continue locally | Catches up after blip |
+| Active cluster region disaster | (both local instances down) | ✓ failover to passive |
+| Passive cluster down | ✓ writes continue locally | Catches up when restored |
+| WAN link broken | ✓ writes continue locally | Catches up when restored |
+
 ## Failover Mechanism
 
 Two ways to fail over (see [FAILOVER.md](FAILOVER.md) for full procedure):
@@ -214,19 +264,21 @@ Some things are deliberately not in Git:
 
 ### Active cluster
 - SuiteCRM: 2 pods × (250m CPU, 512Mi RAM)
-- PostgreSQL: 1 pod × (250m CPU, 512Mi RAM) + 10Gi data
+- PostgreSQL: 2 pods × (250m CPU, 512Mi RAM) + 2 × 10Gi data
+  - 1 primary + 1 synchronous local replica for in-cluster RPO=0
 - Redis: 1 pod × (100m CPU, 128Mi RAM) + 1Gi data
 - Skupper router: ~50m CPU, ~64Mi RAM
-- Total: ~700m CPU, ~1.7Gi RAM, ~31Gi storage
+- Total: ~950m CPU, ~2.2Gi RAM, ~41Gi storage
 
 ### Passive cluster
 - SuiteCRM: 0 pods (but PVC exists, 20Gi)
 - PostgreSQL: 1 pod × (250m CPU, 512Mi RAM) + 10Gi data
+  - Single standby instance; could be scaled to match active after failover
 - Redis: 1 pod × (100m CPU, 128Mi RAM) + 1Gi data
 - Skupper router: ~50m CPU, ~64Mi RAM
 - Total: ~400m CPU, ~700Mi RAM, ~31Gi storage
 
-For the Developer Sandbox or other small environments, both clusters fit comfortably in default limits.
+For multi-cloud production deployments these footprints are negligible. The two PostgreSQL pods on the active cluster should land on different worker nodes (CNPG enforces pod anti-affinity by default) for the synchronous replica to provide real protection.
 
 ## Future Enhancements
 
@@ -239,3 +291,4 @@ Things you could add to this setup:
 - **Submariner** in addition to Skupper for any L3-level workloads
 - **Stretched ClusterSet** with more than 2 clusters for multi-region HA
 - **Argo CD Agent** to reduce hub-to-managed-cluster traffic (Tech Preview as of late 2025)
+- **Event-Driven Ansible (EDA) for automated failover** - implements the "Sleeping through disasters" pattern. See [FAILOVER.md](FAILOVER.md#sleeping-through-disasters-automating-phase-2) for the full design. Requires AAP and the AAP-ACM integration.

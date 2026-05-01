@@ -269,7 +269,7 @@ oc get cluster -n suitecrm suitecrm-db
 # STATUS: Cluster in healthy state
 
 oc get pods -n suitecrm
-# Should see: suitecrm-db-1, redis-*, suitecrm-* (2 replicas), skupper-router-*
+# Should see: suitecrm-db-1, suitecrm-db-2, redis-*, suitecrm-* (2 replicas), skupper-router-*
 
 oc get route -n suitecrm suitecrm
 # Visit the URL, log in with admin credentials

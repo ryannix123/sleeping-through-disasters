@@ -2,6 +2,32 @@
 
 How to fail over from the active cluster to the passive cluster.
 
+## Three Levels of Failure - Three Different Responses
+
+Before reading this runbook, understand which type of failure you're dealing with:
+
+| Failure type | Example | Who handles it | RTO |
+|--------------|---------|----------------|-----|
+| **In-cluster** (pod/node/AZ) | A worker node dies | CNPG operator, automatic | Seconds |
+| **Cross-cluster** (region/cluster) | AWS us-east-1 outage | This runbook | 5-10 min |
+| **Catastrophic** (both clusters) | Multi-region failure | OADP restore from S3 | Hours |
+
+This runbook covers the **cross-cluster** scenario. Don't run it for in-cluster failures - CNPG's automatic in-cluster failover is faster and doesn't require any human action.
+
+### How to Tell Which Failure You Have
+
+Run on the active cluster:
+
+```bash
+oc get cluster suitecrm-db -n suitecrm -o jsonpath='{.status.phase}'
+```
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| `Cluster in healthy state` | Normal operation | None |
+| `Failing over` or `Switchover in progress` | In-cluster failover in progress | Wait, CNPG handles it |
+| (timeout / no response from `oc`) | Active cluster unreachable | Continue with this runbook |
+
 ## When to Use This
 
 Use this runbook when:
@@ -10,6 +36,45 @@ Use this runbook when:
 - A regional outage affects the active cluster's underlying infrastructure
 
 **Do NOT** run a failover for transient issues. PostgreSQL standby promotion is a one-way operation - once promoted, the standby cannot be re-attached as a replica without rebuilding from scratch.
+
+## How Failover Actually Happens: Two-Phase Process
+
+Failover in this architecture happens in two phases, and it's important to understand the distinction:
+
+### Phase 1: Traffic Failover (Automatic, ~1-3 minutes)
+
+**Cloudflare Load Balancer handles this automatically.** When configured with priority-based failover:
+
+- Health checks ping `https://<active-route>/health` every 60 seconds
+- After 3 consecutive failures (~3 minutes total), Cloudflare marks the active origin unhealthy
+- DNS responses immediately start returning the passive cluster's IPs
+- Users hitting the URL now reach the passive cluster
+
+**No human action required.** This part literally lets you sleep through a disaster.
+
+### Phase 2: Application Failover (Currently Manual)
+
+But here's the catch: when traffic arrives at the passive cluster after Phase 1, by default it hits:
+
+- SuiteCRM with `replicas: 0` → 503 errors
+- A read-only PostgreSQL standby → write failures even if app pods existed
+
+So **Phase 1 alone is not enough**. The passive cluster's resources need to be activated:
+1. Promote PostgreSQL standby → primary (`replica.enabled: false`)
+2. Scale SuiteCRM from 0 → 2 replicas
+3. Trigger VolSync restore for file uploads
+
+This phase is currently manual by default - hence the runbook below. See **Sleeping Through Disasters: Automating Phase 2** further down for how to automate this safely.
+
+## The Cloudflare-Triggers-Alert Pattern
+
+If you've configured Cloudflare auto-failover and traffic shifts to passive while Phase 2 hasn't run yet, users see 503 errors. To avoid this gap:
+
+**Configure monitoring to alert on the Cloudflare failover event itself**, not just on application errors. This gives the on-call engineer immediate context:
+
+> "Cloudflare just failed over to passive cluster. Run failover runbook ASAP."
+
+Cloudflare's webhook notifications (or Logpush events) can fire to PagerDuty/Slack the moment the load balancer marks the primary unhealthy. The on-call human then has 3-5 minutes to execute Phase 2 before users notice prolonged 503s.
 
 ## Failover Methods
 
@@ -162,6 +227,123 @@ oc delete pvc -l cnpg.io/cluster=suitecrm-db -n suitecrm
 Argo CD will recreate the `Cluster` CR with `replica.enabled: true`. CNPG will run `pg_basebackup` from the new primary, and replication resumes.
 
 This typically completes in 10-30 minutes depending on database size.
+
+## Sleeping Through Disasters: Automating Phase 2
+
+The "Sleeping through disasters" validated pattern aspires to fully automated failover - including database promotion and app scale-up - so on-call engineers don't get woken up.
+
+This is achievable, but it requires solving the **split-brain problem**: if the active cluster is only network-partitioned (not actually down), automated promotion of the standby creates two primaries. When the partition heals, you have data divergence that's painful (and sometimes impossible) to reconcile.
+
+### Why Manual is the Default
+
+A human checking the active cluster from a different network path is the cheapest, most reliable way to confirm a real outage versus a partition. That's why most enterprise DR runbooks (and ours, by default) require a human to approve promotion.
+
+### Safe Automation Patterns
+
+If you want to automate Phase 2, these patterns mitigate split-brain risk:
+
+#### Pattern 1: Multi-Source Health Validation (Recommended)
+
+Don't trust a single signal. Require **multiple independent observers** to agree the active cluster is down before promoting:
+
+| Signal | Source |
+|--------|--------|
+| Cloudflare health check failed | Cloudflare's edge POPs (global) |
+| External synthetic check failed | Pingdom / Datadog / external monitoring |
+| Kubernetes API unreachable | Hub cluster's view of managed cluster |
+| ACM ManagedCluster status: Unknown | ACM heartbeat |
+| PostgreSQL streaming replication: lag growing or broken | Standby's view of primary |
+
+Promote only when **all five sources** agree the active is unreachable for >5 minutes. This makes split-brain extremely unlikely - either there's a real outage, or there's a catastrophic network event that affects multiple independent observers simultaneously (in which case the right answer is probably still to fail over).
+
+#### Pattern 2: Fence the Old Primary
+
+Before promoting the standby, **forcibly prevent the old primary from accepting writes**. Options:
+
+- Update the active cluster's network policy to deny all egress (if hub can still reach it)
+- Use cloud provider APIs to detach the primary's storage
+- Update DNS to remove the old primary entirely (not just deprioritize)
+- Reduce CNPG instance count to 0 on the old primary
+
+If you can fence the old primary, split-brain becomes impossible - even if the partition heals, the old primary is no longer functional.
+
+#### Pattern 3: Quorum-Based Decisions
+
+Run an external quorum service (etcd, Consul, or a hub-based controller) that holds the "lease" on which cluster is active. Only the cluster holding the lease accepts writes. Failover happens by transferring the lease, which can only happen when quorum agrees.
+
+This is the most robust pattern but requires significant additional infrastructure.
+
+### Implementation: EDA-Driven Phase 2 Automation
+
+Event-Driven Ansible is well-suited for this. A rulebook listening for the multi-source health validation could:
+
+```yaml
+# Conceptual EDA rulebook (pseudocode)
+- name: Validate active cluster outage
+  condition: >
+    event.source == 'cloudflare-webhook' and
+    event.payload.health_status == 'critical' and
+    event.payload.duration_minutes >= 5
+  action:
+    run_playbook:
+      name: validate-and-failover.yml
+      extra_vars:
+        cloudflare_event_id: "{{ event.payload.id }}"
+```
+
+The `validate-and-failover.yml` playbook would:
+
+1. Verify Cloudflare alert is genuine (not a webhook spoof)
+2. Run synthetic checks from 2-3 additional regions
+3. Query ACM hub for ManagedCluster status
+4. Check if SSH/API access to the active cluster is possible from any path
+5. Only proceed if all checks confirm outage
+6. Fence the old primary (if reachable: scale CNPG to 0; if not: rely on partition)
+7. Use the AAP-ACM integration to commit the YAML changes:
+   - `replica.enabled: false` on passive cluster's PostgreSQL
+   - `replicas: 2` on passive cluster's SuiteCRM
+8. Annotate VolSync ReplicationDestination to trigger restore
+9. Wait for promotion to complete, verify health
+10. Send "Failover complete" notification (so the on-call still wakes up *eventually*, just not immediately)
+
+### A Realistic Middle Ground
+
+Full automation is a journey, not a switch. A reasonable progression:
+
+1. **Today (default)**: Cloudflare auto-fails traffic, human runs Phase 2 (current state)
+2. **Phase 1**: Cloudflare alert triggers EDA, which gathers diagnostic data and pre-stages failover (warms VolSync cache, runs read-only checks on passive). Human still approves the actual promotion via a one-click ServiceNow/Slack approval.
+3. **Phase 2**: After Phase 1 has been running reliably for 6+ months with no false positives, enable fully automated promotion - but still send notifications.
+4. **Phase 3**: Add fencing of the old primary for true split-brain protection.
+
+### What "Sleeping" Actually Looks Like With Full Automation
+
+```
+3:42 AM - Active cluster region experiences power outage
+3:42 AM - Cloudflare health checks start failing
+3:45 AM - Cloudflare marks origin unhealthy, DNS shifts to passive
+3:45 AM - Cloudflare webhook → AAP → EDA rulebook fires
+3:46 AM - Multi-source validation runs (synthetic, ACM, replication)
+3:48 AM - All sources confirm outage; fencing playbook runs
+3:48 AM - AAP commits YAML: standby promoted, app scaled up
+3:51 AM - PostgreSQL promotion complete, app pods Ready
+3:52 AM - VolSync restore complete, file uploads available
+3:52 AM - Slack notification: "Failover complete. Investigate root cause when convenient."
+8:00 AM - On-call wakes up to a fully recovered system and a Slack thread to read.
+```
+
+That's the dream. Getting there takes investment, but each step (Phases 1 → 3 above) provides incremental value.
+
+### Trade-offs Summary
+
+| Approach | RTO | Risk | Effort |
+|----------|-----|------|--------|
+| Full manual (no Cloudflare) | 30+ min | Low | None |
+| Cloudflare auto + manual Phase 2 (current) | 5-10 min | Low | Already done |
+| Cloudflare + EDA-staged + human approval | 3-5 min | Low | Medium |
+| Fully automated with multi-source validation | 2-4 min | Medium | High |
+| Fully automated + fencing | 2-4 min | Low | High |
+
+The current setup is at row 2. Most organizations stop there because the marginal RTO improvement isn't worth the complexity. But if your business case justifies it (high RTO penalty, large operations team, frequent regional outages), the path forward is clear.
 
 ## Pre-Failover Checklist
 

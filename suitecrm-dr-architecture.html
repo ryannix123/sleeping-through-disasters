@@ -321,7 +321,7 @@
                         <div class="component database">
                             <div class="component-icon">🐘</div>
                             <div class="component-name">PostgreSQL</div>
-                            <div class="component-detail">CNPG Primary</div>
+                            <div class="component-detail">CNPG Primary + Sync Replica</div>
                         </div>
                         <div class="component cache">
                             <div class="component-icon">⚡</div>
@@ -400,12 +400,12 @@
             <!-- RPO/RTO Metrics -->
             <div class="rpo-rto">
                 <div class="metric">
-                    <div class="metric-value">~0</div>
-                    <div class="metric-label">Database RPO (seconds)</div>
+                    <div class="metric-value">0</div>
+                    <div class="metric-label">DB RPO (in-cluster failure)</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value">15 min</div>
-                    <div class="metric-label">File Upload RPO</div>
+                    <div class="metric-value">~seconds</div>
+                    <div class="metric-label">DB RPO (region failure)</div>
                 </div>
                 <div class="metric">
                     <div class="metric-value">5-10 min</div>
