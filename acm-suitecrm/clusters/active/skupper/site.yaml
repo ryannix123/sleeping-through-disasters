@@ -1,0 +1,46 @@
+---
+# Skupper Site on the active cluster. This creates the interior router
+# that participates in the cross-cluster Virtual Application Network (VAN).
+#
+# Required ConfigMap that the Skupper operator watches.
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: suitecrm-active
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  # Enable a console for debugging (optional)
+  edge: false
+  # Routing mode: interior (full router) or edge (lightweight)
+  routerMode: interior
+---
+# Listener exposes the local PostgreSQL primary (suitecrm-db-rw service)
+# to the VAN, so the standby cluster can connect to it.
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: suitecrm-db-rw
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  routingKey: suitecrm-db-rw
+  host: suitecrm-db-rw
+  port: 5432
+---
+# AccessGrant generates a token that the passive cluster will use to
+# establish the VAN link. After bootstrap, the resulting token Secret
+# needs to be transferred to the passive cluster (one-time operation
+# done out-of-band via secure channel, or via ACM ManifestWork).
+apiVersion: skupper.io/v2alpha1
+kind: AccessGrant
+metadata:
+  name: suitecrm-passive-grant
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  redemptionsAllowed: 1
+  expirationWindow: 168h  # 7 days

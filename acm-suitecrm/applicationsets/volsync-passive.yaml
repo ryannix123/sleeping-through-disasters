@@ -1,0 +1,42 @@
+---
+# Deploys VolSync ReplicationDestination on the passive cluster.
+# Restores from S3 on failover (manually triggered).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-volsync-passive
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-passive
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-volsync-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+        suitecrm.io/component: volsync
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/passive/volsync
+      destination:
+        name: '{{.name}}'
+        namespace: suitecrm
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - ServerSideApply=true

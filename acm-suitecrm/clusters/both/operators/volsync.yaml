@@ -1,0 +1,16 @@
+---
+# VolSync operator subscription. The Red Hat VolSync product is in the
+# redhat-operators catalog as 'volsync-product'.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: volsync-product
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: volsync-product
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

@@ -1,0 +1,23 @@
+---
+# GitOpsCluster is the integration point between ACM Placements and Argo CD.
+# When Placements match clusters, this controller automatically registers
+# those clusters as Argo CD cluster secrets in the openshift-gitops namespace.
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: suitecrm-gitops-cluster
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  # Reference the "both" placement so Argo CD knows about all clusters
+  # in our ManagedClusterSet. ApplicationSets can then use any Placement
+  # (active, passive, both) to target subsets.
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: suitecrm-both
+    namespace: openshift-gitops

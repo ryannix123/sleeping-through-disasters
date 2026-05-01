@@ -1,0 +1,14 @@
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: cloudnative-pg
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  channel: stable-v1
+  installPlanApproval: Automatic
+  name: cloudnative-pg
+  source: community-operators
+  sourceNamespace: openshift-marketplace

@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - 00-namespace.yaml
+  - 01-managedclusterset.yaml
+  - 02-placement-active.yaml
+  - 03-placement-passive.yaml
+  - 04-placement-both.yaml
+  - 05-gitopscluster.yaml

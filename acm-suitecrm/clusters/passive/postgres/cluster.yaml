@@ -1,0 +1,72 @@
+---
+# CloudNativePG standby (replica) cluster for the passive site.
+# Streams WAL from the active cluster's primary via the Skupper VAN.
+#
+# To FAIL OVER to this cluster, change `spec.replica.enabled: false`.
+# This can be done via a Git commit (recommended) or:
+#   oc patch cluster suitecrm-db --type=merge -p '{"spec":{"replica":{"enabled":false}}}'
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: suitecrm-db
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: database
+    suitecrm.io/role: standby
+spec:
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  instances: 1
+
+  # REPLICA MODE - this is the key difference from the primary cluster.
+  # The standby pulls WAL from `source` (defined in externalClusters below).
+  replica:
+    enabled: true
+    source: suitecrm-db-primary
+
+  bootstrap:
+    pg_basebackup:
+      source: suitecrm-db-primary
+      database: suitecrm
+      owner: suitecrm
+
+  # The primary cluster is reachable via the Skupper-exposed service
+  # `suitecrm-db-rw` which appears as a local service on this cluster.
+  externalClusters:
+    - name: suitecrm-db-primary
+      connectionParameters:
+        host: suitecrm-db-rw
+        user: streaming_replica
+        dbname: suitecrm
+        sslmode: require
+      password:
+        name: suitecrm-db-replication
+        key: password
+
+  storage:
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  postgresql:
+    parameters:
+      max_connections: "100"
+      shared_buffers: "256MB"
+      effective_cache_size: "512MB"
+      work_mem: "16MB"
+      maintenance_work_mem: "128MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+
+  monitoring:
+    enablePodMonitor: true

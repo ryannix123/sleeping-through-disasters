@@ -1,0 +1,51 @@
+---
+# CloudNativePG primary cluster for the active site.
+# This is the read-write source of truth that streams WAL to the standby.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: suitecrm-db
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: database
+    suitecrm.io/role: primary
+spec:
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  instances: 1
+
+  bootstrap:
+    initdb:
+      database: suitecrm
+      owner: suitecrm
+
+  storage:
+    size: 10Gi
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+  postgresql:
+    parameters:
+      max_connections: "100"
+      shared_buffers: "256MB"
+      effective_cache_size: "512MB"
+      work_mem: "16MB"
+      maintenance_work_mem: "128MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+    pg_hba:
+      # Allow replication from the standby cluster across the Skupper VAN
+      - host replication streaming_replica all scram-sha-256
+
+  monitoring:
+    enablePodMonitor: true

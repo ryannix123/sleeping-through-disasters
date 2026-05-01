@@ -1,0 +1,27 @@
+---
+# VolSync ReplicationDestination on the passive cluster.
+# Restores the SuiteCRM PVC from S3 backups during failover.
+# Trigger: manual annotation on failover, or schedule for periodic warm restore.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationDestination
+metadata:
+  name: suitecrm-data-restore
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: volsync
+spec:
+  trigger:
+    # Manual trigger - failover script annotates this resource
+    manual: ""
+  restic:
+    repository: volsync-restic-config
+    copyMethod: Snapshot
+    capacity: 20Gi
+    accessModes:
+      - ReadWriteOnce
+    cacheCapacity: 2Gi
+    # Restore the latest snapshot
+    cleanupCachePVC: false
+    cleanupTempPVC: false

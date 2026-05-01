@@ -1,0 +1,48 @@
+---
+# Deploys SuiteCRM application + Redis on the active cluster.
+# Configured for full operation (replicas: 2).
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-app-active
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-active
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-app-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+        suitecrm.io/component: application
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/active/suitecrm
+      destination:
+        name: '{{.name}}'
+        namespace: suitecrm
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            maxDuration: 5m
+            factor: 2

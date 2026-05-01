@@ -1,0 +1,50 @@
+---
+# Deploys operators (CNPG, VolSync, Skupper, OADP) to BOTH clusters.
+# Uses the "suitecrm-both" Placement to target every cluster in the
+# suitecrm-dr ManagedClusterSet.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-operators
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-both
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-operators-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/both/operators
+      destination:
+        # The clusterDecisionResource generator provides {{.name}}
+        # as the managed cluster name; ACM/Argo CD resolve the API URL.
+        name: '{{.name}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            maxDuration: 5m
+            factor: 2

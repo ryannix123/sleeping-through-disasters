@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr

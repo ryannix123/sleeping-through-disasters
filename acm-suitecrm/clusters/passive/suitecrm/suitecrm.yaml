@@ -1,0 +1,172 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: suitecrm-data
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: application
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: suitecrm
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    suitecrm.io/component: application
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+  selector:
+    app: suitecrm
+    suitecrm.io/component: application
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: suitecrm
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    suitecrm.io/component: application
+spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: suitecrm
+  port:
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: suitecrm
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: application
+  annotations:
+    app.openshift.io/runtime: php
+    app.openshift.io/connects-to: '[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","name":"suitecrm-db"},{"apiVersion":"apps/v1","kind":"Deployment","name":"redis"}]'
+spec:
+  # PASSIVE - 0 replicas. Pods spin up only on failover.
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: suitecrm
+      suitecrm.io/component: application
+  template:
+    metadata:
+      labels:
+        app: suitecrm
+        suitecrm.io/component: application
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: suitecrm
+          image: quay.io/ryan_nix/suitecrm-openshift:8.9.2-postgres
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DB_HOST
+              value: "suitecrm-db-rw"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: suitecrm-db-app
+                  key: dbname
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: suitecrm-db-app
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: suitecrm-db-app
+                  key: password
+            - name: SITE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: suitecrm-config
+                  key: site_url
+            - name: ADMIN_USER
+              valueFrom:
+                secretKeyRef:
+                  name: suitecrm-admin
+                  key: username
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: suitecrm-admin
+                  key: password
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+          volumeMounts:
+            - name: suitecrm-data
+              mountPath: /var/www/html/public/legacy/upload
+              subPath: upload
+            - name: suitecrm-data
+              mountPath: /var/www/html/public/legacy/cache
+              subPath: cache
+            - name: suitecrm-data
+              mountPath: /var/www/html/public/legacy/custom
+              subPath: custom
+            - name: suitecrm-data
+              mountPath: /mnt/suitecrm-config
+              subPath: config
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: suitecrm-data
+          persistentVolumeClaim:
+            claimName: suitecrm-data

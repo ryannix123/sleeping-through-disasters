@@ -1,0 +1,42 @@
+---
+# Deploys Skupper Site on the passive cluster + Link to the active cluster's Site.
+# The Link is what creates the encrypted VAN tunnel.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-skupper-passive
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-passive
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-skupper-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+        suitecrm.io/component: skupper
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/passive/skupper
+      destination:
+        name: '{{.name}}'
+        namespace: suitecrm
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - ServerSideApply=true

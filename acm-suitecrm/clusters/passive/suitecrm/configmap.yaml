@@ -1,0 +1,11 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suitecrm-config
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+data:
+  site_url: "https://crm.example.com"

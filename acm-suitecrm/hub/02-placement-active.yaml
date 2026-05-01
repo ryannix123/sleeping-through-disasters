@@ -1,0 +1,18 @@
+---
+# Placement that selects clusters labeled role=active in the suitecrm-dr ClusterSet.
+# Used by ApplicationSets that should only deploy to the active cluster.
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: suitecrm-active
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  clusterSets:
+    - suitecrm-dr
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            role: active

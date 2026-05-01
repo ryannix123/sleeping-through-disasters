@@ -1,0 +1,32 @@
+---
+# ManagedClusterSet groups the active and passive clusters together.
+# Clusters are added to this set by setting the label:
+#   cluster.open-cluster-management.io/clusterset=suitecrm-dr
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSet
+metadata:
+  name: suitecrm-dr
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  clusterSelector:
+    selectorType: ExclusiveClusterSetLabel
+---
+# Bind the ManagedClusterSet to the suitecrm-acm namespace so Placements
+# in this namespace can select clusters from it.
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: suitecrm-dr
+  namespace: suitecrm-acm
+spec:
+  clusterSet: suitecrm-dr
+---
+# Also bind to openshift-gitops so ApplicationSets there can use the same set
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: suitecrm-dr
+  namespace: openshift-gitops
+spec:
+  clusterSet: suitecrm-dr

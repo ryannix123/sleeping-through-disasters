@@ -1,0 +1,16 @@
+---
+# Red Hat Service Interconnect (the productized Skupper) operator.
+# Provides cross-cluster networking for PostgreSQL streaming replication.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: skupper-operator
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  channel: stable-2
+  installPlanApproval: Automatic
+  name: skupper-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

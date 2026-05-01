@@ -1,0 +1,41 @@
+---
+# Skupper Site on the passive cluster.
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: suitecrm-passive
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  edge: false
+  routerMode: interior
+---
+# Connector consumes the listener exposed on the active cluster.
+# Creates a local service named "suitecrm-db-rw" that proxies through
+# the VAN to the actual PostgreSQL primary on the active cluster.
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: suitecrm-db-rw
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  routingKey: suitecrm-db-rw
+  port: 5432
+  selector: skupper.io/component=router
+---
+# AccessToken redeems a token created by AccessGrant on the active cluster.
+# The token Secret must be present in this namespace before this resource
+# can succeed. See docs/BOOTSTRAP.md for the one-time token transfer step.
+apiVersion: skupper.io/v2alpha1
+kind: AccessToken
+metadata:
+  name: suitecrm-active-link
+  namespace: suitecrm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  # The Secret name containing the redemption URL and CA cert
+  secret: suitecrm-active-token

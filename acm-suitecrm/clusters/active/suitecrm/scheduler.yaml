@@ -1,0 +1,75 @@
+---
+# SuiteCRM background scheduler. Runs every minute to process scheduled tasks.
+# Only deployed on active cluster - the standby doesn't need to run schedulers.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: suitecrm-scheduler
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: scheduler
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: suitecrm
+            suitecrm.io/component: scheduler
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          restartPolicy: OnFailure
+          containers:
+            - name: scheduler
+              image: quay.io/ryan_nix/suitecrm-openshift:8.9.2-postgres
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  cat > /var/www/html/.env.local <<ENVFILE
+                  DATABASE_URL=pgsql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?serverVersion=16&charset=utf8
+                  ENVFILE
+                  cd /var/www/html
+                  php bin/console schedulers:run 2>&1 || true
+              env:
+                - name: DB_HOST
+                  value: "suitecrm-db-rw"
+                - name: DB_PORT
+                  value: "5432"
+                - name: DB_NAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: suitecrm-db-app
+                      key: dbname
+                - name: DB_USER
+                  valueFrom:
+                    secretKeyRef:
+                      name: suitecrm-db-app
+                      key: username
+                - name: DB_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: suitecrm-db-app
+                      key: password
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi

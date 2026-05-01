@@ -1,0 +1,33 @@
+---
+# OADP (OpenShift API for Data Protection) Operator namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-adp-operatorgroup
+  namespace: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  targetNamespaces:
+    - openshift-adp
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: redhat-oadp-operator
+  namespace: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: redhat-oadp-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

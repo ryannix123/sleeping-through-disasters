@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SuiteCRM Multi-Cluster DR Architecture (ACM-Managed)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Red Hat Display', 'Segoe UI', system-ui, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #1a1a1a;
+            font-size: 24px;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }
+        .architecture {
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+        .row {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            align-items: flex-start;
+        }
+        .hub {
+            width: 100%;
+            border: 2px solid #ee0000;
+            border-radius: 12px;
+            padding: 20px;
+            background: linear-gradient(135deg, #ffebee 0%, #fff 100%);
+        }
+        .hub-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        .hub-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            font-size: 12px;
+            background: #ee0000;
+        }
+        .hub-components {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .cluster {
+            flex: 1;
+            max-width: 480px;
+            border: 2px solid #ddd;
+            border-radius: 12px;
+            padding: 20px;
+            background: #fafafa;
+        }
+        .cluster.active {
+            border-color: #2e7d32;
+            background: linear-gradient(135deg, #e8f5e9 0%, #fff 100%);
+        }
+        .cluster.passive {
+            border-color: #ef6c00;
+            background: linear-gradient(135deg, #fff3e0 0%, #fff 100%);
+        }
+        .cluster-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #ddd;
+        }
+        .cluster-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            font-size: 12px;
+        }
+        .active .cluster-icon { background: #2e7d32; }
+        .passive .cluster-icon { background: #ef6c00; }
+        .cluster-title {
+            font-weight: 600;
+            font-size: 16px;
+        }
+        .cluster-subtitle {
+            font-size: 12px;
+            color: #666;
+        }
+        .components {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+        .component {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+        .component.wide {
+            grid-column: span 2;
+        }
+        .component-icon {
+            font-size: 24px;
+            margin-bottom: 6px;
+        }
+        .component-name {
+            font-weight: 600;
+            font-size: 13px;
+            color: #333;
+        }
+        .component-detail {
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .component.database { border-color: #1565c0; background: #e3f2fd; }
+        .component.app { border-color: #7b1fa2; background: #f3e5f5; }
+        .component.cache { border-color: #c62828; background: #ffebee; }
+        .component.backup { border-color: #00695c; background: #e0f2f1; }
+        .component.oadp { border-color: #ee0000; background: #fff5f5; }
+        .component.acm { border-color: #ee0000; background: #fff5f5; }
+        .component.gitops { border-color: #ef7b00; background: #fff3e0; }
+        .connection {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px;
+        }
+        .connection-box {
+            background: #fff;
+            border: 2px dashed #1565c0;
+            border-radius: 8px;
+            padding: 12px 24px;
+            text-align: center;
+        }
+        .connection-title {
+            font-weight: 600;
+            color: #1565c0;
+            font-size: 14px;
+        }
+        .connection-detail {
+            font-size: 11px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .external {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+        }
+        .external-box {
+            background: white;
+            border: 2px solid #c2185b;
+            border-radius: 8px;
+            padding: 15px 25px;
+            text-align: center;
+        }
+        .s3-box { border-color: #ff9800; background: #fff8e1; }
+        .git-box { border-color: #424242; background: #f5f5f5; }
+        .arrows {
+            text-align: center;
+            color: #666;
+            font-size: 20px;
+            padding: 5px;
+        }
+        .legend {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #ddd;
+        }
+        .legend-title {
+            font-weight: 600;
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+        .legend-items {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 18px;
+            font-size: 12px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .legend-color {
+            width: 16px;
+            height: 16px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .rpo-rto {
+            margin-top: 20px;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }
+        .metric {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: #1a1a1a;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>SuiteCRM Multi-Cluster DR Architecture</h1>
+        <p class="subtitle">ACM-managed GitOps deployment with CloudNativePG, VolSync, OADP, and Red Hat Service Interconnect</p>
+        
+        <div class="architecture">
+            <!-- Git source -->
+            <div class="external">
+                <div class="external-box git-box">
+                    <div class="component-icon">📁</div>
+                    <div class="component-name">Git Repository</div>
+                    <div class="component-detail">Source of truth for all manifests</div>
+                </div>
+            </div>
+            
+            <div class="arrows">↓ Watched by ↓</div>
+            
+            <!-- Hub Cluster -->
+            <div class="hub">
+                <div class="hub-header">
+                    <div class="hub-icon">H</div>
+                    <div>
+                        <div class="cluster-title">Hub Cluster</div>
+                        <div class="cluster-subtitle">Management plane • Single pane of glass</div>
+                    </div>
+                </div>
+                <div class="hub-components">
+                    <div class="component acm">
+                        <div class="component-icon">🎯</div>
+                        <div class="component-name">Red Hat ACM</div>
+                        <div class="component-detail">ManagedClusterSet • Placements • Policies</div>
+                    </div>
+                    <div class="component gitops">
+                        <div class="component-icon">🔄</div>
+                        <div class="component-name">OpenShift GitOps</div>
+                        <div class="component-detail">10 ApplicationSets • Argo CD reconciliation</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="arrows">↓ Deploys to ↓</div>
+            
+            <!-- Cloudflare -->
+            <div class="external">
+                <div class="external-box">
+                    <div class="component-icon">🌐</div>
+                    <div class="component-name">Cloudflare</div>
+                    <div class="component-detail">Load Balancer + Health Checks</div>
+                </div>
+            </div>
+            
+            <div class="arrows">↓ Routes traffic ↓</div>
+            
+            <!-- Clusters -->
+            <div class="row">
+                <!-- Active Cluster -->
+                <div class="cluster active">
+                    <div class="cluster-header">
+                        <div class="cluster-icon">A</div>
+                        <div>
+                            <div class="cluster-title">Active Cluster</div>
+                            <div class="cluster-subtitle">role=active • Primary site</div>
+                        </div>
+                    </div>
+                    <div class="components">
+                        <div class="component app wide">
+                            <div class="component-icon">📦</div>
+                            <div class="component-name">SuiteCRM</div>
+                            <div class="component-detail">PHP 8.3 + nginx • 2 replicas</div>
+                        </div>
+                        <div class="component database">
+                            <div class="component-icon">🐘</div>
+                            <div class="component-name">PostgreSQL</div>
+                            <div class="component-detail">CNPG Primary</div>
+                        </div>
+                        <div class="component cache">
+                            <div class="component-icon">⚡</div>
+                            <div class="component-name">Redis</div>
+                            <div class="component-detail">Session Cache</div>
+                        </div>
+                        <div class="component backup wide">
+                            <div class="component-icon">📤</div>
+                            <div class="component-name">VolSync ReplicationSource</div>
+                            <div class="component-detail">Uploads → S3 every 15 min</div>
+                        </div>
+                        <div class="component oadp wide">
+                            <div class="component-icon">🛡️</div>
+                            <div class="component-name">OADP (Velero)</div>
+                            <div class="component-detail">Daily namespace backup → S3</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Passive Cluster -->
+                <div class="cluster passive">
+                    <div class="cluster-header">
+                        <div class="cluster-icon">P</div>
+                        <div>
+                            <div class="cluster-title">Passive Cluster</div>
+                            <div class="cluster-subtitle">role=passive • DR site</div>
+                        </div>
+                    </div>
+                    <div class="components">
+                        <div class="component app wide">
+                            <div class="component-icon">📦</div>
+                            <div class="component-name">SuiteCRM</div>
+                            <div class="component-detail">PHP 8.3 + nginx • 0 replicas (standby)</div>
+                        </div>
+                        <div class="component database">
+                            <div class="component-icon">🐘</div>
+                            <div class="component-name">PostgreSQL</div>
+                            <div class="component-detail">CNPG Standby</div>
+                        </div>
+                        <div class="component cache">
+                            <div class="component-icon">⚡</div>
+                            <div class="component-name">Redis</div>
+                            <div class="component-detail">Session Cache</div>
+                        </div>
+                        <div class="component backup wide">
+                            <div class="component-icon">📥</div>
+                            <div class="component-name">VolSync ReplicationDestination</div>
+                            <div class="component-detail">Restore from S3 on failover</div>
+                        </div>
+                        <div class="component oadp wide">
+                            <div class="component-icon">🛡️</div>
+                            <div class="component-name">OADP (Velero)</div>
+                            <div class="component-detail">Restore namespace from S3</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Skupper Connection -->
+            <div class="connection">
+                <div class="connection-box">
+                    <div class="connection-title">🔗 Red Hat Service Interconnect (Skupper VAN)</div>
+                    <div class="connection-detail">PostgreSQL WAL Streaming • mTLS • Outbound HTTPS only</div>
+                </div>
+            </div>
+            
+            <!-- S3 -->
+            <div class="external">
+                <div class="external-box s3-box">
+                    <div class="component-icon">🪣</div>
+                    <div class="component-name">S3 Object Storage</div>
+                    <div class="component-detail">VolSync (file uploads) • OADP (namespace backups)</div>
+                </div>
+            </div>
+            
+            <!-- RPO/RTO Metrics -->
+            <div class="rpo-rto">
+                <div class="metric">
+                    <div class="metric-value">~0</div>
+                    <div class="metric-label">Database RPO (seconds)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">15 min</div>
+                    <div class="metric-label">File Upload RPO</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value">5-10 min</div>
+                    <div class="metric-label">RTO (failover time)</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Legend -->
+        <div class="legend">
+            <div class="legend-title">Technology Stack</div>
+            <div class="legend-items">
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #fff5f5; border-color: #ee0000;"></div>
+                    <span>Red Hat ACM</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #fff3e0; border-color: #ef7b00;"></div>
+                    <span>OpenShift GitOps (Argo CD)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #f3e5f5; border-color: #7b1fa2;"></div>
+                    <span>SuiteCRM 8.9 (CentOS Stream 9 + PHP 8.3)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #e3f2fd; border-color: #1565c0;"></div>
+                    <span>CloudNativePG (PostgreSQL 16)</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #ffebee; border-color: #c62828;"></div>
+                    <span>Redis 8</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #e0f2f1; border-color: #00695c;"></div>
+                    <span>VolSync + Restic</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color" style="background: #fff5f5; border-color: #ee0000;"></div>
+                    <span>OADP / Velero</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

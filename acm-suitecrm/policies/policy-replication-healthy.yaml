@@ -1,0 +1,70 @@
+---
+# ACM Policy that monitors PostgreSQL replication health on the standby cluster.
+# Reports non-compliance if the standby is not in replica mode or not connected.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: suitecrm-replication-healthy
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+  annotations:
+    policy.open-cluster-management.io/categories: SI System and Information Integrity
+    policy.open-cluster-management.io/controls: SI-13 Predictable Failure Prevention
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: standby-cluster-in-replica-mode
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: postgresql.cnpg.io/v1
+                kind: Cluster
+                metadata:
+                  name: suitecrm-db
+                  namespace: suitecrm
+                spec:
+                  replica:
+                    enabled: true
+---
+# Bind ONLY to passive clusters - this policy doesn't apply to the active.
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: suitecrm-replication-healthy-binding
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+placementRef:
+  name: suitecrm-policy-passive-placement
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: suitecrm-replication-healthy
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: suitecrm-policy-passive-placement
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  clusterSets:
+    - suitecrm-dr
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            role: passive

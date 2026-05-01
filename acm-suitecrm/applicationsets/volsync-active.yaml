@@ -1,0 +1,42 @@
+---
+# Deploys VolSync ReplicationSource on the active cluster.
+# Backs up the SuiteCRM PVC (uploads, custom dir) to S3 every 15 min.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-volsync-active
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-active
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-volsync-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+        suitecrm.io/component: volsync
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/active/volsync
+      destination:
+        name: '{{.name}}'
+        namespace: suitecrm
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - ServerSideApply=true

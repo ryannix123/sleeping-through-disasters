@@ -1,0 +1,43 @@
+---
+# Deploys Skupper Site (interior router) on the active cluster.
+# This cluster acts as the VAN endpoint that exposes the PostgreSQL
+# primary service to the passive cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-skupper-active
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-active
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-skupper-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+        suitecrm.io/component: skupper
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/active/skupper
+      destination:
+        name: '{{.name}}'
+        namespace: suitecrm
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - ServerSideApply=true

@@ -1,0 +1,41 @@
+---
+# Creates the suitecrm namespace on both clusters along with any
+# RBAC and base resources both clusters need.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: suitecrm-namespace
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: suitecrm-both
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'suitecrm-namespace-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: suitecrm-dr
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        targetRevision: main
+        path: clusters/both/namespace
+      destination:
+        name: '{{.name}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true

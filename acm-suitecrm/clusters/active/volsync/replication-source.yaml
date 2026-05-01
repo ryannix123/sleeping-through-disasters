@@ -1,0 +1,28 @@
+---
+# VolSync ReplicationSource backs up the SuiteCRM PVC to S3 every 15 minutes.
+# Uses Restic for encrypted, deduplicated backups.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationSource
+metadata:
+  name: suitecrm-data-backup
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+    suitecrm.io/component: volsync
+spec:
+  sourcePVC: suitecrm-data
+  trigger:
+    schedule: "*/15 * * * *"
+  restic:
+    pruneIntervalDays: 7
+    repository: volsync-restic-config
+    # Use snapshots for crash-consistent backups when CSI snapshots available
+    copyMethod: Snapshot
+    storageClassName: ""  # Use default storage class
+    cacheCapacity: 2Gi
+    retain:
+      hourly: 24
+      daily: 7
+      weekly: 4
+      monthly: 3

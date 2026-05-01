@@ -1,0 +1,14 @@
+---
+# Configuration values for the active cluster.
+# In a real deployment, the site_url would be the Cloudflare-managed
+# domain that resolves to whichever cluster is active.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: suitecrm-config
+  namespace: suitecrm
+  labels:
+    app: suitecrm
+    app.kubernetes.io/part-of: suitecrm-dr
+data:
+  site_url: "https://crm.example.com"

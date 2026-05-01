@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: suitecrm
+
+resources:
+  - replication-destination.yaml
+
+# Note: The volsync-restic-config secret containing S3 credentials must
+# match the one on the active cluster (same repo, same encryption key).
+# Create it out-of-band via External Secrets Operator or Sealed Secrets.

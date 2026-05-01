@@ -1,0 +1,110 @@
+---
+# ACM Policy that ensures the required operators are installed and healthy
+# on every cluster in the suitecrm-dr ManagedClusterSet.
+#
+# This is a belt-and-suspenders complement to the Argo CD ApplicationSets:
+# Argo CD installs the operator subscriptions, this Policy verifies they're
+# actually running and reports compliance status to the ACM hub.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: suitecrm-required-operators
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+  annotations:
+    policy.open-cluster-management.io/categories: CM Configuration Management
+    policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: cnpg-operator-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: ClusterServiceVersion
+                metadata:
+                  namespace: openshift-operators
+                spec:
+                  displayName: CloudNativePG
+                status:
+                  phase: Succeeded
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: volsync-operator-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: ClusterServiceVersion
+                metadata:
+                  namespace: openshift-operators
+                spec:
+                  displayName: VolSync
+                status:
+                  phase: Succeeded
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: skupper-operator-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: ClusterServiceVersion
+                metadata:
+                  namespace: openshift-operators
+                spec:
+                  displayName: Skupper Operator
+                status:
+                  phase: Succeeded
+---
+# Bind the policy to the suitecrm-both placement so it applies to both
+# the active and passive clusters.
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: suitecrm-required-operators-binding
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+placementRef:
+  name: suitecrm-policy-placement
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: suitecrm-required-operators
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy
+---
+# Placement for policies (lives in suitecrm-acm namespace, separate from the
+# ones used by ApplicationSets which live in openshift-gitops).
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: suitecrm-policy-placement
+  namespace: suitecrm-acm
+  labels:
+    app.kubernetes.io/part-of: suitecrm-dr
+spec:
+  clusterSets:
+    - suitecrm-dr
