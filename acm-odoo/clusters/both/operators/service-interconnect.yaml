@@ -7,7 +7,7 @@ metadata:
   name: skupper-operator
   namespace: openshift-operators
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   channel: stable-2
   installPlanApproval: Automatic

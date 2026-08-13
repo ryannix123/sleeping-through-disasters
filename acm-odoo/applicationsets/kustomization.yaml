@@ -8,7 +8,7 @@ resources:
   - postgres-passive.yaml
   - skupper-active.yaml
   - skupper-passive.yaml
-  - suitecrm-active.yaml
-  - suitecrm-passive.yaml
+  - odoo-active.yaml
+  - odoo-passive.yaml
   - volsync-active.yaml
   - volsync-passive.yaml

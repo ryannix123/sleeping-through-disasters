@@ -5,12 +5,12 @@
 apiVersion: volsync.backube/v1alpha1
 kind: ReplicationDestination
 metadata:
-  name: suitecrm-data-restore
-  namespace: suitecrm
+  name: odoo-data-restore
+  namespace: odoo
   labels:
-    app: suitecrm
-    app.kubernetes.io/part-of: suitecrm-dr
-    suitecrm.io/component: volsync
+    app: odoo
+    app.kubernetes.io/part-of: odoo-dr
+    odoo.io/component: volsync
 spec:
   trigger:
     # Manual trigger - failover script annotates this resource

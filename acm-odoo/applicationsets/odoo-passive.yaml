@@ -1,13 +1,12 @@
 ---
-# Deploys SuiteCRM application on the passive cluster with replicas=0.
-# Redis runs (so it's warm), but the app pods don't start until failover.
+# Deploys the Odoo application on the passive cluster (standby, replicas: 0).
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: suitecrm-app-passive
+  name: odoo-app-passive
   namespace: openshift-gitops
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   goTemplate: true
   goTemplateOptions:
@@ -17,23 +16,23 @@ spec:
         configMapRef: acm-placement
         labelSelector:
           matchLabels:
-            cluster.open-cluster-management.io/placement: suitecrm-passive
+            cluster.open-cluster-management.io/placement: odoo-passive
         requeueAfterSeconds: 180
   template:
     metadata:
-      name: 'suitecrm-app-{{.name}}'
+      name: 'odoo-app-{{.name}}'
       labels:
-        app.kubernetes.io/part-of: suitecrm-dr
-        suitecrm.io/component: application
+        app.kubernetes.io/part-of: odoo-dr
+        odoo.io/component: application
     spec:
       project: default
       source:
-        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        repoURL: https://github.com/ryannix123/acm-odoo.git
         targetRevision: main
-        path: clusters/passive/suitecrm
+        path: clusters/passive/odoo
       destination:
         name: '{{.name}}'
-        namespace: suitecrm
+        namespace: odoo
       syncPolicy:
         automated:
           prune: true

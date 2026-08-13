@@ -1,32 +1,32 @@
 ---
 # ManagedClusterSet groups the active and passive clusters together.
 # Clusters are added to this set by setting the label:
-#   cluster.open-cluster-management.io/clusterset=suitecrm-dr
+#   cluster.open-cluster-management.io/clusterset=odoo-dr
 apiVersion: cluster.open-cluster-management.io/v1beta2
 kind: ManagedClusterSet
 metadata:
-  name: suitecrm-dr
+  name: odoo-dr
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   clusterSelector:
     selectorType: ExclusiveClusterSetLabel
 ---
-# Bind the ManagedClusterSet to the suitecrm-acm namespace so Placements
+# Bind the ManagedClusterSet to the odoo-acm namespace so Placements
 # in this namespace can select clusters from it.
 apiVersion: cluster.open-cluster-management.io/v1beta2
 kind: ManagedClusterSetBinding
 metadata:
-  name: suitecrm-dr
-  namespace: suitecrm-acm
+  name: odoo-dr
+  namespace: odoo-acm
 spec:
-  clusterSet: suitecrm-dr
+  clusterSet: odoo-dr
 ---
 # Also bind to openshift-gitops so ApplicationSets there can use the same set
 apiVersion: cluster.open-cluster-management.io/v1beta2
 kind: ManagedClusterSetBinding
 metadata:
-  name: suitecrm-dr
+  name: odoo-dr
   namespace: openshift-gitops
 spec:
-  clusterSet: suitecrm-dr
+  clusterSet: odoo-dr

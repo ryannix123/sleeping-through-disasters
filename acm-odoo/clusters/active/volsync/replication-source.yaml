@@ -4,14 +4,14 @@
 apiVersion: volsync.backube/v1alpha1
 kind: ReplicationSource
 metadata:
-  name: suitecrm-data-backup
-  namespace: suitecrm
+  name: odoo-data-backup
+  namespace: odoo
   labels:
-    app: suitecrm
-    app.kubernetes.io/part-of: suitecrm-dr
-    suitecrm.io/component: volsync
+    app: odoo
+    app.kubernetes.io/part-of: odoo-dr
+    odoo.io/component: volsync
 spec:
-  sourcePVC: suitecrm-data
+  sourcePVC: odoo-data
   trigger:
     schedule: "*/15 * * * *"
   restic:

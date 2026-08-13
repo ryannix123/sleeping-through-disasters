@@ -5,7 +5,7 @@ kind: Namespace
 metadata:
   name: openshift-adp
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 ---
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
@@ -13,7 +13,7 @@ metadata:
   name: openshift-adp-operatorgroup
   namespace: openshift-adp
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   targetNamespaces:
     - openshift-adp
@@ -24,7 +24,7 @@ metadata:
   name: redhat-oadp-operator
   namespace: openshift-adp
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   channel: stable
   installPlanApproval: Automatic

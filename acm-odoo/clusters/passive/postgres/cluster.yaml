@@ -4,17 +4,17 @@
 #
 # To FAIL OVER to this cluster, change `spec.replica.enabled: false`.
 # This can be done via a Git commit (recommended) or:
-#   oc patch cluster suitecrm-db --type=merge -p '{"spec":{"replica":{"enabled":false}}}'
+#   oc patch cluster odoo-db --type=merge -p '{"spec":{"replica":{"enabled":false}}}'
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: suitecrm-db
-  namespace: suitecrm
+  name: odoo-db
+  namespace: odoo
   labels:
-    app: suitecrm
-    app.kubernetes.io/part-of: suitecrm-dr
-    suitecrm.io/component: database
-    suitecrm.io/role: standby
+    app: odoo
+    app.kubernetes.io/part-of: odoo-dr
+    odoo.io/component: database
+    odoo.io/role: standby
 spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.6
   instances: 1
@@ -23,25 +23,25 @@ spec:
   # The standby pulls WAL from `source` (defined in externalClusters below).
   replica:
     enabled: true
-    source: suitecrm-db-primary
+    source: odoo-db-primary
 
   bootstrap:
     pg_basebackup:
-      source: suitecrm-db-primary
-      database: suitecrm
-      owner: suitecrm
+      source: odoo-db-primary
+      database: odoo
+      owner: odoo
 
   # The primary cluster is reachable via the Skupper-exposed service
-  # `suitecrm-db-rw` which appears as a local service on this cluster.
+  # `odoo-db-rw` which appears as a local service on this cluster.
   externalClusters:
-    - name: suitecrm-db-primary
+    - name: odoo-db-primary
       connectionParameters:
-        host: suitecrm-db-rw
+        host: odoo-db-rw
         user: streaming_replica
-        dbname: suitecrm
+        dbname: odoo
         sslmode: require
       password:
-        name: suitecrm-db-replication
+        name: odoo-db-replication
         key: password
 
   storage:

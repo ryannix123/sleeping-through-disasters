@@ -6,28 +6,28 @@
 apiVersion: skupper.io/v2alpha1
 kind: Site
 metadata:
-  name: suitecrm-active
-  namespace: suitecrm
+  name: odoo-active
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   # Enable a console for debugging (optional)
   edge: false
   # Routing mode: interior (full router) or edge (lightweight)
   routerMode: interior
 ---
-# Listener exposes the local PostgreSQL primary (suitecrm-db-rw service)
+# Listener exposes the local PostgreSQL primary (odoo-db-rw service)
 # to the VAN, so the standby cluster can connect to it.
 apiVersion: skupper.io/v2alpha1
 kind: Listener
 metadata:
-  name: suitecrm-db-rw
-  namespace: suitecrm
+  name: odoo-db-rw
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
-  routingKey: suitecrm-db-rw
-  host: suitecrm-db-rw
+  routingKey: odoo-db-rw
+  host: odoo-db-rw
   port: 5432
 ---
 # AccessGrant generates a token that the passive cluster will use to
@@ -37,10 +37,10 @@ spec:
 apiVersion: skupper.io/v2alpha1
 kind: AccessGrant
 metadata:
-  name: suitecrm-passive-grant
-  namespace: suitecrm
+  name: odoo-passive-grant
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   redemptionsAllowed: 1
   expirationWindow: 168h  # 7 days

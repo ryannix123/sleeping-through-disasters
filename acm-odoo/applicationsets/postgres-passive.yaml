@@ -4,10 +4,10 @@
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: suitecrm-postgres-passive
+  name: odoo-postgres-passive
   namespace: openshift-gitops
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   goTemplate: true
   goTemplateOptions:
@@ -17,23 +17,23 @@ spec:
         configMapRef: acm-placement
         labelSelector:
           matchLabels:
-            cluster.open-cluster-management.io/placement: suitecrm-passive
+            cluster.open-cluster-management.io/placement: odoo-passive
         requeueAfterSeconds: 180
   template:
     metadata:
-      name: 'suitecrm-postgres-{{.name}}'
+      name: 'odoo-postgres-{{.name}}'
       labels:
-        app.kubernetes.io/part-of: suitecrm-dr
-        suitecrm.io/component: postgres
+        app.kubernetes.io/part-of: odoo-dr
+        odoo.io/component: postgres
     spec:
       project: default
       source:
-        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        repoURL: https://github.com/ryannix123/acm-odoo.git
         targetRevision: main
         path: clusters/passive/postgres
       destination:
         name: '{{.name}}'
-        namespace: suitecrm
+        namespace: odoo
       syncPolicy:
         automated:
           prune: true

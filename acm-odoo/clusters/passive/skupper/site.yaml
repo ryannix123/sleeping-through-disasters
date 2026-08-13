@@ -3,26 +3,26 @@
 apiVersion: skupper.io/v2alpha1
 kind: Site
 metadata:
-  name: suitecrm-passive
-  namespace: suitecrm
+  name: odoo-passive
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   edge: false
   routerMode: interior
 ---
 # Connector consumes the listener exposed on the active cluster.
-# Creates a local service named "suitecrm-db-rw" that proxies through
+# Creates a local service named "odoo-db-rw" that proxies through
 # the VAN to the actual PostgreSQL primary on the active cluster.
 apiVersion: skupper.io/v2alpha1
 kind: Connector
 metadata:
-  name: suitecrm-db-rw
-  namespace: suitecrm
+  name: odoo-db-rw
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
-  routingKey: suitecrm-db-rw
+  routingKey: odoo-db-rw
   port: 5432
   selector: skupper.io/component=router
 ---
@@ -32,10 +32,10 @@ spec:
 apiVersion: skupper.io/v2alpha1
 kind: AccessToken
 metadata:
-  name: suitecrm-active-link
-  namespace: suitecrm
+  name: odoo-active-link
+  namespace: odoo
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   # The Secret name containing the redemption URL and CA cert
-  secret: suitecrm-active-token
+  secret: odoo-active-token

@@ -1,35 +1,29 @@
 ---
-# CloudNativePG primary cluster for the active site.
-# This is the read-write source of truth that streams WAL to the standby.
-#
-# Architecture:
-#  - 2 instances within this cluster (1 primary + 1 local synchronous replica)
-#    -> Provides RPO=0 for AZ-level failures within the active cluster
-#  - Async streaming replication to the passive cluster across Skupper VAN
-#    -> Provides ~seconds RPO for region/cluster-level failures
-#
-# Pod anti-affinity (default in CNPG) ensures the two instances land on
-# different worker nodes / availability zones for true redundancy.
+# Active cluster: the PRIMARY CloudNativePG PostgreSQL cluster for Odoo.
+# Source of truth. The passive cluster streams from it over the Skupper VAN.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: suitecrm-db
-  namespace: suitecrm
+  name: odoo-db
+  namespace: odoo
   labels:
-    app: suitecrm
-    app.kubernetes.io/part-of: suitecrm-dr
-    suitecrm.io/component: database
-    suitecrm.io/role: primary
+    app: odoo
+    app.kubernetes.io/part-of: odoo-dr
+    odoo.io/component: database
+    odoo.io/role: primary
 spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.6
-  # 2 instances = 1 primary + 1 hot standby
-  # CNPG handles intra-cluster failover automatically if the primary pod fails.
-  instances: 2
+
+  # SNO: single instance. A second Postgres pod can't schedule on one node
+  # (default pod anti-affinity), so there is no in-cluster hot standby. DR
+  # resilience comes from the cross-cluster replica on the passive site, not
+  # from intra-cluster failover. This is the expected trade-off on single-node.
+  instances: 1
 
   bootstrap:
     initdb:
-      database: suitecrm
-      owner: suitecrm
+      database: odoo
+      owner: odoo
 
   storage:
     size: 10Gi
@@ -55,25 +49,17 @@ spec:
       random_page_cost: "1.1"
       effective_io_concurrency: "200"
     pg_hba:
-      # Allow replication from the standby cluster across the Skupper VAN
+      # Allow replication from the standby cluster across the Skupper VAN.
       - host replication streaming_replica all scram-sha-256
 
-    # Quorum-based synchronous replication.
-    # method: any + number: 1 means: every commit must be acknowledged by
-    # at least 1 of the local replicas before returning success to the client.
-    # With instances: 2, this enforces synchronous replication to the local
-    # standby pod, giving RPO=0 for in-cluster failures.
-    #
-    # IMPORTANT: This applies ONLY to the local in-cluster replica.
-    # The cross-cluster replica (passive site) remains asynchronous to avoid
-    # halting writes when the WAN link or passive cluster is degraded.
-    synchronous:
-      method: any
-      number: 1
-      # dataDurability: required (default) means writes pause if no sync
-      # replica is available. For a 2-instance cluster, that only happens
-      # if the standby pod is actively unhealthy. Acceptable trade-off.
-      dataDurability: required
+    # NOTE: No synchronous replication is configured. With a single instance
+    # there is no local replica to acknowledge commits, so quorum-based
+    # synchronous replication (method: any, number: 1) would pause ALL writes
+    # under the default dataDurability: required — the database would never
+    # accept writes and Odoo's first-boot init would hang. The cross-cluster
+    # replica on the passive site is asynchronous by design (so a degraded WAN
+    # link never halts writes on the active primary), which is exactly what we
+    # want for this DR pattern.
 
   monitoring:
     enablePodMonitor: true

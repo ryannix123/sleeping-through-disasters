@@ -4,10 +4,10 @@
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: suitecrm-skupper-passive
+  name: odoo-skupper-passive
   namespace: openshift-gitops
   labels:
-    app.kubernetes.io/part-of: suitecrm-dr
+    app.kubernetes.io/part-of: odoo-dr
 spec:
   goTemplate: true
   goTemplateOptions:
@@ -17,23 +17,23 @@ spec:
         configMapRef: acm-placement
         labelSelector:
           matchLabels:
-            cluster.open-cluster-management.io/placement: suitecrm-passive
+            cluster.open-cluster-management.io/placement: odoo-passive
         requeueAfterSeconds: 180
   template:
     metadata:
-      name: 'suitecrm-skupper-{{.name}}'
+      name: 'odoo-skupper-{{.name}}'
       labels:
-        app.kubernetes.io/part-of: suitecrm-dr
-        suitecrm.io/component: skupper
+        app.kubernetes.io/part-of: odoo-dr
+        odoo.io/component: skupper
     spec:
       project: default
       source:
-        repoURL: https://github.com/ryannix123/acm-suitecrm.git
+        repoURL: https://github.com/ryannix123/acm-odoo.git
         targetRevision: main
         path: clusters/passive/skupper
       destination:
         name: '{{.name}}'
-        namespace: suitecrm
+        namespace: odoo
       syncPolicy:
         automated:
           prune: true

@@ -1,0 +1,17 @@
+---
+# Stable public URL for Odoo (analogous to the SuiteCRM site_url pattern).
+# Odoo stores web.base.url in the DB and uses it to build absolute links in
+# emails, portal invites, and report footers. In a DR setup users must reach
+# the app at ONE stable hostname regardless of which cluster is active —
+# typically a Cloudflare/GSLB record that follows role=active. Set the same
+# value on BOTH clusters so links keep working after failover.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: odoo-config
+  namespace: odoo
+  labels:
+    app: odoo
+    app.kubernetes.io/part-of: odoo-dr
+data:
+  web_base_url: "https://odoo.example.com"
