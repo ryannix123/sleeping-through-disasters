@@ -1,0 +1,47 @@
+---
+# CloudNativePG primary (2 instances, synchronous) on the active cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: odoo-postgres-active
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - clusterDecisionResource:
+        configMapRef: acm-placement
+        labelSelector:
+          matchLabels:
+            cluster.open-cluster-management.io/placement: odoo-active
+        requeueAfterSeconds: 180
+  template:
+    metadata:
+      name: 'odoo-postgres-active-{{.name}}'
+      labels:
+        app.kubernetes.io/part-of: odoo-dr
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ryannix123/sleeping-through-disasters.git
+        targetRevision: main
+        path: clusters/active/postgres
+      destination:
+        name: '{{.name}}'
+        namespace: odoo
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 10
+          backoff:
+            duration: 30s
+            maxDuration: 5m
+            factor: 2

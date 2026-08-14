@@ -1,0 +1,68 @@
+---
+# Verifies the passive cluster's database is actually in replica mode.
+# If someone promotes it by accident, this goes non-compliant in the ACM
+# console — an early warning for split-brain.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: odoo-standby-in-replica-mode
+  namespace: odoo-dr-acm
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    policy.open-cluster-management.io/categories: SI System and Information Integrity
+    policy.open-cluster-management.io/controls: SI-13 Predictable Failure Prevention
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: standby-replica-enabled
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: postgresql.cnpg.io/v1
+                kind: Cluster
+                metadata:
+                  name: odoo-db
+                  namespace: odoo
+                spec:
+                  replica:
+                    enabled: true
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: odoo-policy-passive
+  namespace: odoo-dr-acm
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  clusterSets:
+    - odoo-dr
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            role: passive
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: odoo-standby-in-replica-mode
+  namespace: odoo-dr-acm
+placementRef:
+  name: odoo-policy-passive
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: odoo-standby-in-replica-mode
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy

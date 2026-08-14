@@ -1,0 +1,36 @@
+---
+# Backs the Odoo filestore up to object storage every 2 minutes with Restic.
+#
+# NOTE ON CONSISTENCY: Odoo's ir_attachment rows reference files in the
+# filestore by checksum. The database replicates in seconds; this volume
+# replicates every 2 minutes. After a regional failover a small number of
+# recent attachments may be referenced by the database but not yet present
+# on disk. See docs/ARCHITECTURE.md for the two ways to close that window.
+#
+# The schedule is deliberately aggressive. Restic is incremental, so a cycle
+# with few changes is cheap. If a sync ever runs longer than the interval,
+# VolSync does not stack jobs — the next trigger is skipped and the effective
+# RPO becomes the actual sync duration. Watch .status.lastSyncDuration and
+# back the interval off if it approaches the schedule.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationSource
+metadata:
+  name: odoo-data-backup
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    app.kubernetes.io/component: volsync
+spec:
+  sourcePVC: odoo-data
+  trigger:
+    schedule: "*/2 * * * *"
+  restic:
+    repository: volsync-restic-config
+    copyMethod: Snapshot
+    cacheCapacity: 2Gi
+    pruneIntervalDays: 7
+    retain:
+      hourly: 24
+      daily: 7
+      weekly: 4
+      monthly: 3

@@ -1,0 +1,69 @@
+---
+# CloudNativePG primary for the active site.
+#
+# Two-tier replication:
+#   Tier 1 (here)  — 2 instances with quorum synchronous replication.
+#                    RPO 0 and automatic promotion for node/AZ failure.
+#   Tier 2 (passive cluster) — asynchronous streaming across the Service
+#                    Interconnect VAN. Seconds of RPO for a regional loss,
+#                    and it never blocks a production write.
+#
+# CNPG applies pod anti-affinity by default, so the two instances land on
+# different nodes.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: odoo-db
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    app.kubernetes.io/component: database
+    odoo.dr/role: primary
+spec:
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  instances: 2
+
+  bootstrap:
+    initdb:
+      database: odoo
+      owner: odoo
+      # Odoo's entrypoint may create/extend the database, so give the owner
+      # the privileges it expects.
+      postInitSQL:
+        - ALTER ROLE odoo CREATEDB
+
+  storage:
+    size: 20Gi
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "512MB"
+      effective_cache_size: "1536MB"
+      work_mem: "16MB"
+      maintenance_work_mem: "256MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+    pg_hba:
+      # Allow the standby cluster to authenticate for streaming replication.
+      - host replication streaming_replica all scram-sha-256
+
+    # Quorum synchronous replication to the LOCAL replica only.
+    # The cross-cluster replica stays asynchronous by design.
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+
+  monitoring:
+    enablePodMonitor: true

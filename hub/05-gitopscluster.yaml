@@ -1,0 +1,19 @@
+---
+# Registers every cluster matched by the placement as an Argo CD cluster secret,
+# so ApplicationSets can target them by name.
+apiVersion: apps.open-cluster-management.io/v1beta1
+kind: GitOpsCluster
+metadata:
+  name: odoo-dr-gitops
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  argoServer:
+    cluster: local-cluster
+    argoNamespace: openshift-gitops
+  placementRef:
+    kind: Placement
+    apiVersion: cluster.open-cluster-management.io/v1beta1
+    name: odoo-both
+    namespace: openshift-gitops

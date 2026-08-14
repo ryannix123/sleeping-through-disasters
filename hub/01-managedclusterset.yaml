@@ -1,0 +1,31 @@
+---
+# Groups the active and passive clusters into one set.
+# Add a cluster to the set with:
+#   oc label managedcluster <name> cluster.open-cluster-management.io/clusterset=odoo-dr
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSet
+metadata:
+  name: odoo-dr
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  clusterSelector:
+    selectorType: ExclusiveClusterSetLabel
+---
+# Bind the set into the namespace where the ApplicationSets live.
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: odoo-dr
+  namespace: openshift-gitops
+spec:
+  clusterSet: odoo-dr
+---
+# Bind the set into the namespace where the Policies live.
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: odoo-dr
+  namespace: odoo-dr-acm
+spec:
+  clusterSet: odoo-dr

@@ -1,0 +1,145 @@
+# Odoo 19 on Red Hat Universal Base Image 10 — Sleeping Through Disasters build
+#
+# Forked from https://github.com/ryannix123/odoo-on-openshift and adjusted for
+# multi-cluster DR. The image itself is deliberately unchanged in substance;
+# all the DR behaviour lives in entrypoint.sh:
+#   * refuses to initialise or write against a read-only PostgreSQL standby
+#   * can pin attachments into the database (ATTACHMENT_LOCATION=db) so the
+#     filestore and the database share one replication stream
+#
+# Runs as an arbitrary non-root UID under OpenShift's restricted SCC.
+FROM registry.access.redhat.com/ubi10/ubi:latest
+
+ARG ODOO_VERSION=19.0
+ARG WKHTMLTOPDF_VERSION=0.12.6.1-3
+
+LABEL name="odoo-sleeping-through-disasters" \
+      version="${ODOO_VERSION}" \
+      summary="Odoo ${ODOO_VERSION} Community on UBI 10, multi-cluster DR build" \
+      maintainer="ryannix123"
+
+ENV ODOO_VERSION=${ODOO_VERSION} \
+    LANG=C.UTF-8 \
+    ODOO_RC=/etc/odoo/odoo.conf \
+    PIP_ROOT_USER_ACTION=ignore \
+    PATH="/opt/odoo/venv/bin:${PATH}"
+
+# ---------------------------------------------------------------------------
+# System dependencies
+# UBI 10 ships Python 3.12 (odoo 19 supports 3.10+). We pull the RHEL-native
+# packages for the C libraries Odoo's Python wheels link against, plus fonts
+# for PDF rendering.
+# ---------------------------------------------------------------------------
+# Some -devel headers (openldap-devel, libpq-devel) live in the CodeReady
+# Builder repo. On UBI 10 this repo is present but disabled; it's available
+# without a subscription and is enabled per-transaction with --enablerepo,
+# whose ID is codeready-builder-for-ubi-10-<arch>-rpms.
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    CRB="codeready-builder-for-ubi-10-${ARCH}-rpms"; \
+    dnf -y install --setopt=install_weak_deps=False \
+        --enablerepo="${CRB}" \
+        python3 python3-pip python3-devel \
+        gcc gcc-c++ make \
+        libxml2-devel libxslt-devel \
+        openldap-devel libjpeg-turbo-devel \
+        zlib-devel openssl-devel \
+        postgresql \
+        libpq-devel \
+        freetype-devel \
+        tar xz which; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf; \
+    # The entrypoint's DB-wait and first-boot logic need these client tools.
+    command -v psql; \
+    command -v pg_isready
+
+# Fonts for PDF rendering. Since we install the wkhtmltopdf RPM with --nodeps
+# below (skipping its xorg font dependency), the liberation fonts here are the
+# system fonts wkhtmltopdf will actually use. They live in UBI 10's AppStream.
+RUN set -eux; \
+    dnf -y install --setopt=install_weak_deps=False \
+        liberation-sans-fonts liberation-serif-fonts liberation-mono-fonts \
+    || dnf -y install --setopt=install_weak_deps=False liberation-fonts-common liberation-sans-fonts \
+    || dnf -y install --setopt=install_weak_deps=False dejavu-sans-fonts; \
+    rpm -qa | grep -Ei 'liberation|dejavu' | head; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf
+
+# ---------------------------------------------------------------------------
+# wkhtmltopdf 0.12.6 with patched Qt (required for headers/footers in reports).
+#
+# The el9 RPM hard-requires xorg-x11-fonts-75dpi, which was dropped from EL10
+# and is absent in UBI 10's repos, so a plain `dnf install` fails. The binary
+# itself is statically linked against its bundled patched Qt and only needs a
+# handful of runtime libraries plus *a* system font (satisfied by the
+# liberation fonts installed above). We therefore install the real runtime
+# dependencies explicitly, then force-install the RPM with --nodeps to bypass
+# the unsatisfiable X11 bitmap-font requirement.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    dnf -y install --setopt=install_weak_deps=False \
+        fontconfig freetype libpng libjpeg-turbo openssl-libs \
+        libX11 libXext libXrender zlib; \
+    dnf clean all; \
+    rm -rf /var/cache/dnf
+
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "${ARCH}" in \
+        x86_64|aarch64) WK_ARCH="${ARCH}" ;; \
+        *) echo "Unsupported arch ${ARCH}"; exit 1 ;; \
+    esac; \
+    BASE="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTMLTOPDF_VERSION}"; \
+    ok=""; \
+    for distro in almalinux9 centos8; do \
+        url="${BASE}/wkhtmltox-${WKHTMLTOPDF_VERSION}.${distro}.${WK_ARCH}.rpm"; \
+        echo "Trying ${url}"; \
+        if curl -fsSL -o /tmp/wkhtmltox.rpm "${url}"; then ok="yes"; break; fi; \
+    done; \
+    test -n "${ok}"; \
+    # --nodeps skips the phantom xorg-x11-fonts-75dpi requirement; the runtime
+    # libs it actually links against are installed in the layer above.
+    rpm -i --nodeps /tmp/wkhtmltox.rpm; \
+    rm -f /tmp/wkhtmltox.rpm; \
+    fc-cache -f; \
+    wkhtmltopdf --version
+
+# ---------------------------------------------------------------------------
+# Odoo source + Python dependencies inside a venv.
+# We pin to the branch tip of the requested major version.
+# ---------------------------------------------------------------------------
+RUN python3 -m venv /opt/odoo/venv \
+    && /opt/odoo/venv/bin/pip install --no-cache-dir --upgrade pip wheel setuptools
+
+RUN set -eux; \
+    curl -sSL -o /tmp/odoo.tar.gz \
+        "https://github.com/odoo/odoo/archive/refs/heads/${ODOO_VERSION}.tar.gz"; \
+    mkdir -p /opt/odoo/src; \
+    tar -xzf /tmp/odoo.tar.gz -C /opt/odoo/src --strip-components=1; \
+    rm -f /tmp/odoo.tar.gz; \
+    /opt/odoo/venv/bin/pip install --no-cache-dir -r /opt/odoo/src/requirements.txt; \
+    /opt/odoo/venv/bin/pip install --no-cache-dir -e /opt/odoo/src
+
+# ---------------------------------------------------------------------------
+# Directory layout. OpenShift injects an arbitrary UID that is always a member
+# of the root group (GID 0), so we make the relevant dirs group-writable.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /etc/odoo /var/lib/odoo /mnt/extra-addons \
+    && cp /opt/odoo/src/odoo-bin /usr/local/bin/odoo \
+    && chmod +x /usr/local/bin/odoo
+
+COPY odoo.conf /etc/odoo/odoo.conf
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Group-writable so the random UID can write filestore, sessions, config.
+RUN chgrp -R 0 /etc/odoo /var/lib/odoo /mnt/extra-addons /opt/odoo \
+    && chmod -R g=u /etc/odoo /var/lib/odoo /mnt/extra-addons /opt/odoo
+
+USER 1001
+WORKDIR /var/lib/odoo
+EXPOSE 8069 8072
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["odoo"]

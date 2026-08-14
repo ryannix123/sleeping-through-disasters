@@ -1,0 +1,18 @@
+---
+# Red Hat Service Interconnect (the productised Skupper).
+# Carries PostgreSQL streaming replication between clusters in different
+# hyperscalers using outbound HTTPS and mutual TLS — no VPN, no firewall
+# changes, no cross-cloud IP coordination.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: skupper-operator
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  channel: stable-2
+  installPlanApproval: Automatic
+  name: skupper-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

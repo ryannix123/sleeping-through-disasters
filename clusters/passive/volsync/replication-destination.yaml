@@ -1,0 +1,23 @@
+---
+# Restores the Odoo filestore from object storage during failover.
+# Triggered by annotating this resource; see docs/FAILOVER.md.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationDestination
+metadata:
+  name: odoo-data-restore
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    app.kubernetes.io/component: volsync
+spec:
+  trigger:
+    manual: ""
+  restic:
+    repository: volsync-restic-config
+    copyMethod: Snapshot
+    capacity: 20Gi
+    accessModes:
+      - ReadWriteOnce
+    cacheCapacity: 2Gi
+    cleanupCachePVC: false
+    cleanupTempPVC: false

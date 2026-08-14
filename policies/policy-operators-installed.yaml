@@ -1,0 +1,92 @@
+---
+# Reports whether the required operators are installed and healthy on every
+# cluster in the set. Argo CD installs them; this Policy verifies and surfaces
+# compliance in the ACM console.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: odoo-required-operators
+  namespace: odoo-dr-acm
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    policy.open-cluster-management.io/categories: CM Configuration Management
+    policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: cnpg-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: Subscription
+                metadata:
+                  name: cloudnative-pg
+                  namespace: openshift-operators
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: volsync-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: Subscription
+                metadata:
+                  name: volsync-product
+                  namespace: openshift-operators
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: interconnect-installed
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: Subscription
+                metadata:
+                  name: skupper-operator
+                  namespace: openshift-operators
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: odoo-policy-both
+  namespace: odoo-dr-acm
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  clusterSets:
+    - odoo-dr
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: odoo-required-operators
+  namespace: odoo-dr-acm
+placementRef:
+  name: odoo-policy-both
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: odoo-required-operators
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy

@@ -1,0 +1,12 @@
+---
+# Selects every cluster in the odoo-dr set. Used for operators and namespaces.
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: odoo-both
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  clusterSets:
+    - odoo-dr

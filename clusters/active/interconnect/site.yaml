@@ -1,0 +1,41 @@
+---
+# Service Interconnect Site on the ACTIVE cluster.
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: odoo-active
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  routerMode: interior
+---
+# Connector — publishes the LOCAL PostgreSQL primary onto the VAN.
+#
+# The Connector lives on the site that owns the workload. The selector targets
+# whichever pod CNPG currently marks as primary, so the connector follows an
+# in-cluster failover automatically.
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: odoo-db-primary
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  routingKey: odoo-db-primary
+  port: 5432
+  selector: cnpg.io/cluster=odoo-db,cnpg.io/instanceRole=primary
+---
+# AccessGrant — issues a single-use token the passive site redeems to build
+# the link. Rotate by deleting and recreating this resource.
+apiVersion: skupper.io/v2alpha1
+kind: AccessGrant
+metadata:
+  name: odoo-passive-grant
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  redemptionsAllowed: 1
+  expirationWindow: 168h

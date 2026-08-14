@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - operators.yaml
+  - namespace.yaml
+  - postgres-active.yaml
+  - postgres-passive.yaml
+  - interconnect-active.yaml
+  - interconnect-passive.yaml
+  - app-active.yaml
+  - app-passive.yaml
+  - volsync-active.yaml
+  - volsync-passive.yaml

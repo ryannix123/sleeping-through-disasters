@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: odoo
+resources:
+  - replication-source.yaml
+
+# The volsync-restic-config Secret (S3 endpoint, credentials, RESTIC_PASSWORD)
+# is NOT in Git. It must be identical on both clusters so the passive site can
+# read the same repository. See docs/BOOTSTRAP.md.

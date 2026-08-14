@@ -1,0 +1,69 @@
+---
+# CloudNativePG replica cluster for the passive site.
+#
+# It streams WAL from the active cluster's primary. The primary is reachable
+# at "odoo-db-primary" — a local Service created by the Service Interconnect
+# Listener, which tunnels across the VAN to the active cluster.
+#
+# TO FAIL OVER: set spec.replica.enabled to false and commit.
+# Argo CD applies it and CNPG promotes this cluster to primary.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: odoo-db
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    app.kubernetes.io/component: database
+    odoo.dr/role: standby
+spec:
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  instances: 1
+
+  # ---- Replica mode. Flip to false to promote. ----
+  replica:
+    enabled: true
+    source: odoo-db-active
+
+  bootstrap:
+    pg_basebackup:
+      source: odoo-db-active
+
+  externalClusters:
+    - name: odoo-db-active
+      connectionParameters:
+        # Local Service published by the Interconnect Listener.
+        host: odoo-db-primary
+        port: "5432"
+        user: streaming_replica
+        dbname: odoo
+        sslmode: require
+      password:
+        name: odoo-db-replication
+        key: password
+
+  storage:
+    size: 20Gi
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "512MB"
+      effective_cache_size: "1536MB"
+      work_mem: "16MB"
+      maintenance_work_mem: "256MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+
+  monitoring:
+    enablePodMonitor: true

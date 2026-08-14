@@ -1,0 +1,34 @@
+---
+# OADP — Red Hat's productised Velero. Namespace-level backup, the third
+# layer of protection behind database replication and filestore replication.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+---
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: openshift-adp
+  namespace: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  targetNamespaces:
+    - openshift-adp
+---
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: redhat-oadp-operator
+  namespace: openshift-adp
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  channel: stable
+  installPlanApproval: Automatic
+  name: redhat-oadp-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace

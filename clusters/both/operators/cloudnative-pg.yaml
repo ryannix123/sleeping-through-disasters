@@ -1,0 +1,18 @@
+---
+# CloudNativePG — the PostgreSQL operator. Apache 2.0, CNCF-governed.
+# Red Hat is not a database vendor, so this is the one CNCF (rather than
+# Red Hat) component in the stack. It runs on any CSI storage driver, which
+# keeps the pattern storage-vendor-neutral.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: cloudnative-pg
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  channel: stable-v1
+  installPlanApproval: Automatic
+  name: cloudnative-pg
+  source: community-operators
+  sourceNamespace: openshift-marketplace

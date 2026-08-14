@@ -1,0 +1,13 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    openshift.io/display-name: "Odoo ERP"
+    openshift.io/description: "Odoo 19 Community — business of record for the DR pattern"

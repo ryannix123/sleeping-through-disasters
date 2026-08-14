@@ -1,0 +1,17 @@
+---
+# Selects the cluster labelled role=passive.
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: odoo-passive
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  clusterSets:
+    - odoo-dr
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            role: passive
