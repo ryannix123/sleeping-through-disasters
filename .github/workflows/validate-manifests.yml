@@ -1,0 +1,148 @@
+# Validates the GitOps manifests before Argo CD ever sees them.
+#
+# In a GitOps repo the manifests ARE the deployment, so a typo here is an
+# outage on the passive cluster that nobody notices until failover. This
+# workflow catches the cheap classes of mistake: unparseable YAML, a
+# kustomization referencing a file that does not exist, an ApplicationSet
+# pointing at a path that is not in the repo, and drift between the
+# active/passive pairs that are supposed to stay in step.
+name: Validate manifests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'hub/**'
+      - 'applicationsets/**'
+      - 'clusters/**'
+      - 'policies/**'
+      - '.github/workflows/validate-manifests.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install kustomize
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
+            | bash -s -- /usr/local/bin
+          kustomize version
+
+      - name: Build every kustomization
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r k; do
+            d="$(dirname "$k")"
+            if kustomize build "$d" > /dev/null; then
+              echo "ok   $d"
+            else
+              echo "FAIL $d"; fail=1
+            fi
+          done < <(find . -name kustomization.yaml | sort)
+          exit "$fail"
+
+      - name: Check ApplicationSet paths and placements exist
+        run: |
+          python3 - <<'PY'
+          import glob, os, sys, yaml
+
+          def docs(p):
+              return [d for d in yaml.safe_load_all(open(p)) if d]
+
+          errors = []
+
+          placements = {
+              d['metadata']['name']
+              for f in glob.glob('hub/*.yaml') for d in docs(f)
+              if d.get('kind') == 'Placement'
+          }
+
+          for f in glob.glob('applicationsets/*.yaml'):
+              for d in docs(f):
+                  if d.get('kind') != 'ApplicationSet':
+                      continue
+                  name = d['metadata']['name']
+                  gen = d['spec']['generators'][0]['clusterDecisionResource']
+                  ref = gen['labelSelector']['matchLabels'][
+                      'cluster.open-cluster-management.io/placement']
+                  if ref not in placements:
+                      errors.append(f"{name}: placement '{ref}' is not defined in hub/")
+                  path = d['spec']['template']['spec']['source']['path']
+                  if not os.path.isdir(path):
+                      errors.append(f"{name}: source path '{path}' does not exist")
+
+          for e in errors:
+              print("ERROR:", e)
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Check DR invariants
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+
+          def docs(p):
+              return [d for d in yaml.safe_load_all(open(p)) if d]
+
+          errors = []
+
+          def one(path, kind):
+              return [d for d in docs(path) if d.get('kind') == kind]
+
+          # The passive database must stay in replica mode on main.
+          # Promotion is a deliberate commit, and should be reviewed.
+          passive_db = one('clusters/passive/postgres/cluster.yaml', 'Cluster')[0]
+          if passive_db['spec'].get('replica', {}).get('enabled') is not True:
+              errors.append(
+                  "passive PostgreSQL has replica.enabled != true — this is a "
+                  "promotion. Intentional? Approve deliberately.")
+
+          # The active database must keep its synchronous local replica.
+          active_db = one('clusters/active/postgres/cluster.yaml', 'Cluster')[0]
+          if active_db['spec'].get('instances', 0) < 2:
+              errors.append("active PostgreSQL has fewer than 2 instances — "
+                            "loses RPO 0 for node/AZ failure")
+          if not active_db['spec']['postgresql'].get('synchronous'):
+              errors.append("active PostgreSQL has no synchronous config")
+
+          # Interconnect routing keys must match across the two sites.
+          conn = {d['spec']['routingKey']
+                  for d in one('clusters/active/interconnect/site.yaml', 'Connector')}
+          lstn = {d['spec']['routingKey']
+                  for d in one('clusters/passive/interconnect/site.yaml', 'Listener')}
+          if conn != lstn:
+              errors.append(f"routingKey mismatch: connector {conn} vs listener {lstn}")
+
+          # The standby must dial the host the Listener actually publishes.
+          hosts = {ec['connectionParameters']['host']
+                   for ec in passive_db['spec'].get('externalClusters', [])}
+          published = {d['spec']['host']
+                       for d in one('clusters/passive/interconnect/site.yaml', 'Listener')}
+          if hosts != published:
+              errors.append(
+                  f"standby externalClusters host {hosts} does not match the "
+                  f"Listener host {published}")
+
+          # Odoo cannot run more than one replica on a ReadWriteOnce filestore.
+          for side in ('active', 'passive'):
+              dep = [d for d in docs(f'clusters/{side}/odoo/odoo.yaml')
+                     if d.get('kind') == 'Deployment'][0]
+              pvc = [d for d in docs(f'clusters/{side}/odoo/odoo.yaml')
+                     if d.get('kind') == 'PersistentVolumeClaim'][0]
+              rwo = 'ReadWriteOnce' in pvc['spec']['accessModes']
+              if rwo and dep['spec']['replicas'] > 1:
+                  errors.append(
+                      f"{side}: Odoo replicas > 1 with a ReadWriteOnce filestore. "
+                      "Use ReadWriteMany or ATTACHMENT_LOCATION=db first.")
+
+          for e in errors:
+              print("ERROR:", e)
+          sys.exit(1 if errors else 0)
+          PY

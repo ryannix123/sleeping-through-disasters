@@ -1,0 +1,96 @@
+# Builds the Sleeping Through Disasters Odoo image and pushes it to Quay.
+#
+# Triggers:
+#   - changes under container/
+#   - weekly, to pick up UBI security updates
+#   - manually, with an optional Odoo version override
+#
+# Repository secrets required:
+#   QUAY_USERNAME, QUAY_PASSWORD
+name: Build Odoo image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'container/**'
+      - '.github/workflows/build-image.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'container/**'
+  schedule:
+    # Mondays 06:00 UTC — rebuild on the current UBI 10 base.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      odoo_version:
+        description: 'Odoo version branch to build (e.g. 19.0)'
+        required: false
+        default: '19.0'
+
+env:
+  REGISTRY: quay.io
+  IMAGE_NAME: ryan_nix/odoo-openshift-dr
+  DEFAULT_ODOO_VERSION: '19.0'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: vars
+        run: |
+          VERSION="${{ github.event.inputs.odoo_version || env.DEFAULT_ODOO_VERSION }}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "major=${VERSION%%.*}" >> "$GITHUB_OUTPUT"
+          echo "Building Odoo ${VERSION}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Quay
+        # Skipped on pull requests: build only, never push.
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./container
+          file: ./container/Containerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            ODOO_VERSION=${{ steps.vars.outputs.version }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.major }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "### Image pushed"
+            echo ""
+            echo '```'
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.version }}"
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.major }}"
+            echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
