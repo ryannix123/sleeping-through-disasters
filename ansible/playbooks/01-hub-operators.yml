@@ -1,0 +1,102 @@
+---
+# Phase 1.1 — install OpenShift GitOps and ACM on the hub, then create the
+# MultiClusterHub and wait for it to come up.
+- name: Hub foundation
+  hosts: hub
+  gather_facts: false
+
+  tasks:
+    - name: Subscribe to OpenShift GitOps
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: openshift-gitops-operator
+            namespace: openshift-operators
+          spec:
+            channel: "{{ gitops_channel }}"
+            installPlanApproval: Automatic
+            name: openshift-gitops-operator
+            source: redhat-operators
+            sourceNamespace: openshift-marketplace
+
+    - name: Create the ACM namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: open-cluster-management
+
+    - name: Create the ACM OperatorGroup
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: open-cluster-management
+            namespace: open-cluster-management
+          spec:
+            targetNamespaces:
+              - open-cluster-management
+
+    - name: Subscribe to Advanced Cluster Management
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: advanced-cluster-management
+            namespace: open-cluster-management
+          spec:
+            channel: "{{ acm_channel }}"
+            installPlanApproval: Automatic
+            name: advanced-cluster-management
+            source: redhat-operators
+            sourceNamespace: openshift-marketplace
+
+    - name: Wait for the ACM operator to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: open-cluster-management
+      register: acm_csv
+      retries: "{{ operator_wait_retries }}"
+      delay: "{{ operator_wait_delay }}"
+      until:
+        - acm_csv.resources | selectattr('metadata.name', 'search', 'advanced-cluster-management')
+          | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+
+    - name: Create the MultiClusterHub
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: operator.open-cluster-management.io/v1
+          kind: MultiClusterHub
+          metadata:
+            name: multiclusterhub
+            namespace: open-cluster-management
+          spec: {}
+
+    - name: Wait for the MultiClusterHub to report Running
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operator.open-cluster-management.io/v1
+        kind: MultiClusterHub
+        name: multiclusterhub
+        namespace: open-cluster-management
+      register: mch
+      retries: "{{ operator_wait_retries }}"
+      delay: "{{ operator_wait_delay }}"
+      until: mch.resources[0].status.phase | default('') == 'Running'

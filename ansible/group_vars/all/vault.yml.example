@@ -1,0 +1,18 @@
+---
+# Copy to vault.yml, then encrypt:
+#   ansible-vault encrypt group_vars/all/vault.yml
+#
+# Or let playbooks/00-generate-secrets.yml create and encrypt it for you.
+# Never commit the unencrypted form.
+
+vault_odoo_admin_password: "change-me"        # Odoo master password
+vault_odoo_login_password: "change-me"        # admin user login
+vault_pg_replicator_password: "change-me"     # PostgreSQL replication role
+
+vault_volsync_s3_access_key: "change-me"
+vault_volsync_s3_secret_key: "change-me"
+vault_volsync_restic_password: "change-me"    # losing this loses the backups
+
+vault_cloudflare_api_token: "change-me"       # needs Load Balancing edit
+vault_cloudflare_account_id: "change-me"
+vault_cloudflare_zone_id: "change-me"

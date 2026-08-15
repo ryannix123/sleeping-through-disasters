@@ -1,0 +1,134 @@
+---
+# The verification table from docs/BOOTSTRAP.md, as assertions.
+# Safe to run any time — it changes nothing.
+- name: Verify the active cluster
+  hosts: active
+  gather_facts: false
+
+  tasks:
+    - name: Fetch the PostgreSQL cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ odoo_namespace }}"
+      register: pg
+
+    - name: Assert two instances are ready
+      ansible.builtin.assert:
+        that:
+          - pg.resources[0].status.readyInstances | default(0) | int == 2
+        fail_msg: >-
+          Active cluster does not have 2 ready instances — Tier 1 (RPO ~0 for
+          node/AZ failure) is not in place.
+        success_msg: "Active PostgreSQL: 2 instances ready"
+
+    - name: Check the local replica is synchronous
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ odoo_namespace }}"
+        pod: odoo-db-1
+        command: >-
+          psql -U postgres -tAc
+          "SELECT count(*) FROM pg_stat_replication WHERE sync_state = 'sync';"
+      register: sync_check
+      changed_when: false
+
+    - name: Assert a synchronous standby exists
+      ansible.builtin.assert:
+        that:
+          - sync_check.stdout | trim | int >= 1
+        fail_msg: "No synchronous standby — the in-cluster RPO promise is not met."
+        success_msg: "Synchronous local replica confirmed"
+
+    - name: Fetch the Odoo deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: odoo
+        namespace: "{{ odoo_namespace }}"
+      register: odoo_active
+
+    - name: Assert Odoo is serving
+      ansible.builtin.assert:
+        that:
+          - odoo_active.resources[0].status.readyReplicas | default(0) | int >= 1
+        fail_msg: "Odoo is not ready on the active cluster."
+        success_msg: "Odoo is serving on the active cluster"
+
+    - name: Fetch the VolSync ReplicationSource
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: volsync.backube/v1alpha1
+        kind: ReplicationSource
+        name: odoo-data-backup
+        namespace: "{{ odoo_namespace }}"
+      register: volsync_src
+
+    - name: Report file-store sync status
+      ansible.builtin.debug:
+        msg:
+          - "Last sync:     {{ volsync_src.resources[0].status.lastSyncTime | default('not yet run') }}"
+          - "Last duration: {{ volsync_src.resources[0].status.lastSyncDuration | default('n/a') }}"
+          - "Note: if duration approaches the 2-minute schedule, the effective RPO is the duration, not the schedule."
+
+- name: Verify the passive cluster
+  hosts: passive
+  gather_facts: false
+
+  tasks:
+    - name: Fetch the PostgreSQL cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ odoo_namespace }}"
+      register: pg_passive
+
+    - name: Assert it is still a replica
+      ansible.builtin.assert:
+        that:
+          - pg_passive.resources[0].spec.replica.enabled | default(false) | bool
+        fail_msg: >-
+          The passive database is NOT in replica mode. If this was not a
+          deliberate promotion, you may have a split-brain risk.
+        success_msg: "Passive PostgreSQL is in replica mode"
+
+    - name: Measure replication lag
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ odoo_namespace }}"
+        pod: odoo-db-1
+        command: >-
+          psql -U postgres -tAc
+          "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0)::int;"
+      register: lag_check
+      changed_when: false
+
+    - name: Assert lag is within threshold
+      ansible.builtin.assert:
+        that:
+          - lag_check.stdout | trim | int <= replication_lag_threshold_seconds
+        fail_msg: >-
+          Replication lag is {{ lag_check.stdout | trim }}s, above the
+          {{ replication_lag_threshold_seconds }}s threshold.
+        success_msg: "Replication lag: {{ lag_check.stdout | trim }}s"
+
+    - name: Fetch the Odoo deployment
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Deployment
+        name: odoo
+        namespace: "{{ odoo_namespace }}"
+      register: odoo_passive
+
+    - name: Assert Odoo is scaled to zero
+      ansible.builtin.assert:
+        that:
+          - odoo_passive.resources[0].spec.replicas | int == 0
+        fail_msg: >-
+          Odoo is running on the passive cluster. Expected 0 replicas outside
+          a failover.
+        success_msg: "Odoo is at 0 replicas on the passive cluster — correct"

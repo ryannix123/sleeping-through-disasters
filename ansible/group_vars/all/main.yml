@@ -1,0 +1,34 @@
+---
+# ── Non-secret configuration ────────────────────────────────────────────────
+# Secrets live in vault.yml (encrypted). See README.md.
+
+# Namespaces
+odoo_namespace: odoo
+clusterset_name: odoo-dr
+
+# Git repo the ApplicationSets pull from. Change to your fork.
+gitops_repo_url: "https://github.com/ryannix123/sleeping-through-disasters.git"
+gitops_repo_revision: main
+
+# Operator channels. Pin these deliberately.
+acm_channel: release-2.12
+gitops_channel: latest
+
+# Object storage for VolSync. The bucket and region are not secret;
+# the credentials and restic password are (vault.yml).
+volsync_s3_endpoint: "s3.amazonaws.com"
+volsync_s3_bucket: "odoo-dr-backups"
+volsync_s3_region: "us-east-1"
+volsync_restic_path: "odoo-filestore"
+
+# ── Cloudflare ──────────────────────────────────────────────────────────────
+cloudflare_hostname: "odoo.example.com"
+cloudflare_monitor_path: "/web/health"
+cloudflare_monitor_interval: 60      # seconds between health checks
+cloudflare_monitor_retries: 2        # retries before a pool is marked down
+cloudflare_lb_ttl: 30                # keep low; DNS TTL dominates real RTO
+
+# ── Waits ───────────────────────────────────────────────────────────────────
+operator_wait_retries: 60
+operator_wait_delay: 15
+replication_lag_threshold_seconds: 60

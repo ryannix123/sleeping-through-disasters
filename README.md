@@ -91,6 +91,7 @@ sleeping-through-disasters/
 │   ├── active/               Primary DB, Connector, Odoo ×1, VolSync Source
 │   └── passive/              Replica DB, Listener, Odoo ×0, VolSync Destination
 │
+├── ansible/                  Build-time automation (hub, secrets, link, Cloudflare)
 ├── container/                Odoo image (forked, DR-adjusted)
 ├── .github/workflows/        Image build + manifest validation
 ├── policies/                 ACM compliance policies
@@ -115,14 +116,32 @@ Three ACM `Placement` resources resolve those labels to clusters. Each Applicati
 
 ## Quick start
 
+Two ways in.
+
+**Automated** — the Ansible layer handles hub operators, cluster import, the
+secrets, the Interconnect token transfer, and Cloudflare:
+
 ```bash
-# On the hub cluster, with ACM and OpenShift GitOps already installed:
+cd ansible
+ansible-galaxy collection install -r requirements.yml
+ansible-playbook playbooks/00-generate-secrets.yml   # generate + seal the vault
+ansible-vault edit group_vars/all/vault.yml          # add S3 + Cloudflare values
+ansible-playbook site.yml
+```
+
+**By hand** — if you would rather see each step:
+
+```bash
+# On the hub, with ACM and OpenShift GitOps already installed:
 oc apply -k hub/
 oc apply -k applicationsets/
 oc apply -k policies/          # optional, compliance reporting
 ```
 
-Full walkthrough, including the two secrets that are deliberately **not** in Git and the one-time Interconnect token transfer: **[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)**.
+Full walkthrough either way, including the three secrets that are deliberately
+**not** in Git and the one-time Interconnect token transfer:
+**[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)**. The automation boundary — what
+Ansible owns versus what Argo CD owns — is in **[ansible/README.md](ansible/README.md)**.
 
 ## Failover in one line
 

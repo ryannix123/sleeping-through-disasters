@@ -1,0 +1,72 @@
+---
+# Phase 1.4 and 2 — apply the hub bootstrap and the ApplicationSets, then
+# wait for the four operators to install on both managed clusters.
+#
+# Early sync failures are expected here: the postgres, interconnect and
+# volsync Applications cannot succeed until their CRDs exist. Argo retries.
+- name: Apply hub bootstrap and ApplicationSets
+  hosts: hub
+  gather_facts: false
+
+  vars:
+    repo_root: "{{ playbook_dir }}/../.."
+
+  tasks:
+    - name: Apply hub/ (ManagedClusterSet, Placements, GitOpsCluster)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ item }}"
+      loop: >-
+        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/hub/*.yaml', wantlist=True)
+           | map('file') | map('from_yaml_all') | flatten | select('defined')
+           | rejectattr('kind', 'equalto', 'Kustomization') | list }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    - name: Apply the ApplicationSets
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ item }}"
+      loop: >-
+        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/applicationsets/*.yaml', wantlist=True)
+           | map('file') | map('from_yaml_all') | flatten | select('defined')
+           | selectattr('kind', 'equalto', 'ApplicationSet') | list }}
+      loop_control:
+        label: "{{ item.metadata.name }}"
+
+- name: Wait for the operators to install on both managed clusters
+  hosts: managed
+  gather_facts: false
+
+  vars:
+    required_operators:
+      - cloudnative-pg
+      - volsync
+      - skupper
+      - oadp
+
+  tasks:
+    - name: Wait for each operator to reach Succeeded
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+      register: csvs
+      retries: "{{ operator_wait_retries }}"
+      delay: "{{ operator_wait_delay }}"
+      until: >-
+        required_operators | reject('in',
+          csvs.resources | default([])
+            | selectattr('status.phase', 'defined')
+            | selectattr('status.phase', 'equalto', 'Succeeded')
+            | map(attribute='metadata.name') | join(' ')
+        ) | list | length == 0
+
+    - name: Report which operators are installed
+      ansible.builtin.debug:
+        msg: >-
+          {{ csvs.resources | selectattr('status.phase', 'defined')
+             | selectattr('status.phase', 'equalto', 'Succeeded')
+             | map(attribute='metadata.name') | list }}

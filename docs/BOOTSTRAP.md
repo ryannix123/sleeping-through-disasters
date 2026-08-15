@@ -1,16 +1,38 @@
 # Bootstrap
 
-First deployment, start to finish.
+Deployment order, start to finish.
+
+The steps are grouped into phases because several of them **fail confusingly if run early**. Each phase notes what must be true before you move on, and which errors are expected rather than real.
 
 ## Prerequisites
 
 - **Three OpenShift clusters**, 4.14+: a hub, and two managed clusters in different hyperscalers
 - `oc` logged in, cluster-admin on all three
 - A **fork of this repo** — you will edit the `repoURL` in the ApplicationSets
-- **S3-compatible object storage** for VolSync (AWS S3, Azure Blob via S3 gateway, MinIO, ODF)
+- **S3-compatible object storage** for VolSync (AWS S3, Azure Blob via an S3 gateway, MinIO, ODF)
 - A **Cloudflare account on a plan that includes Load Balancing** (health checks and failover)
 
-## 1. Hub operators
+> **Prefer to automate this?** `ansible/` covers every phase below except the
+> manifests themselves, which Argo CD owns. Run `ansible-playbook site.yml`,
+> or use the per-phase playbooks alongside this document. See
+> [../ansible/README.md](../ansible/README.md).
+
+## Order at a glance
+
+| Phase | What | Gate before moving on |
+|---|---|---|
+| 1 | Hub foundation: operators, import clusters, labels, `hub/` | Both clusters visible in Argo CD |
+| 2 | ApplicationSets — operators install first | Four operators `Succeeded` on both clusters |
+| 3 | Secrets that are not in Git | Three Secrets present on both clusters |
+| 4 | Active site comes up | `odoo-db` healthy, sync replica confirmed, Odoo serving |
+| 5 | Link the two sites | `odoo-db-primary` answers from the passive cluster |
+| 6 | Passive database, then Cloudflare | Replication lag in seconds |
+
+---
+
+## Phase 1 — Hub foundation
+
+### 1.1 Install the hub operators
 
 ```bash
 # OpenShift GitOps
@@ -58,7 +80,7 @@ spec:
 EOF
 ```
 
-Once the operator is running, create the hub:
+Then create the hub itself:
 
 ```bash
 cat <<'EOF' | oc apply -f -
@@ -70,28 +92,23 @@ metadata:
 spec: {}
 EOF
 
-# Wait for Running — takes 5–10 minutes
-oc get multiclusterhub -n open-cluster-management -w
+oc get multiclusterhub -n open-cluster-management -w   # wait for Running, 5-10 min
 ```
 
-## 2. Import and label the managed clusters
+### 1.2 Import and label the managed clusters
 
-Import both clusters through the ACM console (**Infrastructure → Clusters → Import cluster**), then label them:
+Import both through the ACM console (**Infrastructure → Clusters → Import cluster**), then:
 
 ```bash
 oc label managedcluster <cluster-a> cluster.open-cluster-management.io/clusterset=odoo-dr
 oc label managedcluster <cluster-b> cluster.open-cluster-management.io/clusterset=odoo-dr
 oc label managedcluster <cluster-a> role=active
 oc label managedcluster <cluster-b> role=passive
-```
 
-Verify:
-
-```bash
 oc get managedclusters -L role,cluster.open-cluster-management.io/clusterset
 ```
 
-## 3. Point the repo at your fork
+### 1.3 Point the repo at your fork
 
 ```bash
 git clone https://github.com/<you>/sleeping-through-disasters.git
@@ -100,10 +117,10 @@ cd sleeping-through-disasters
 grep -rl 'ryannix123/sleeping-through-disasters' applicationsets/ \
   | xargs sed -i 's|ryannix123/sleeping-through-disasters|<you>/sleeping-through-disasters|g'
 
-git commit -am "Point ApplicationSets at this fork" && git push
+git commit -am "Point at this fork" && git push
 ```
 
-## 4. Apply the hub bootstrap
+### 1.4 Apply the hub bootstrap
 
 ```bash
 oc apply -k hub/
@@ -111,121 +128,169 @@ oc get placements -n openshift-gitops
 oc get gitopscluster -n openshift-gitops
 ```
 
-Both managed clusters should now appear in the Argo CD UI under **Settings → Clusters**.
+> **Gate.** Both managed clusters must now appear in the Argo CD UI under **Settings → Clusters**. If they do not, stop — every ApplicationSet targets clusters by name, so nothing downstream will land correctly.
 
-## 5. Create the secrets that are not in Git
+---
 
-Run this on **each managed cluster**. The namespace may not exist yet on a first run; create it if needed.
-
-```bash
-oc new-project odoo 2>/dev/null || oc project odoo
-
-# Odoo admin credentials
-oc create secret generic odoo-admin \
-  --from-literal=admin-password="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)" \
-  --from-literal=login-password="$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)" \
-  -n odoo
-```
-
-> Use the **same** admin values on both clusters, so a failover does not change the login.
-
-VolSync credentials — these **must be identical on both clusters**, same bucket and same `RESTIC_PASSWORD`, or the passive site cannot read the backups:
-
-```bash
-oc create secret generic volsync-restic-config \
-  --from-literal=AWS_ACCESS_KEY_ID='<key>' \
-  --from-literal=AWS_SECRET_ACCESS_KEY='<secret>' \
-  --from-literal=AWS_DEFAULT_REGION='us-east-1' \
-  --from-literal=RESTIC_REPOSITORY='s3:s3.amazonaws.com/<bucket>/odoo-filestore' \
-  --from-literal=RESTIC_PASSWORD='<a strong passphrase — save this>' \
-  -n odoo
-```
-
-For production, replace both with Sealed Secrets or External Secrets Operator. See ARCHITECTURE.md.
-
-## 6. Deploy
+## Phase 2 — ApplicationSets
 
 ```bash
 oc apply -k applicationsets/
 ```
 
-Ten ApplicationSets appear, generating Argo CD Applications per cluster. Operators install first; the rest retries until they are ready — typically 5–10 minutes.
+Ten ApplicationSets appear and Argo CD starts reconciling everything at once.
+
+> **Expect failures here, and do not chase them.** The `postgres-*`, `interconnect-*` and `volsync-*` Applications will fail their first syncs because the CRDs they depend on do not exist until the operators finish installing. The retry backoff in each ApplicationSet handles it. This is the noisiest phase of the deployment and almost none of it is real.
 
 ```bash
 # On each managed cluster
 oc get csv -A | grep -E 'cloudnative-pg|volsync|skupper|oadp'
 ```
 
-## 7. Link the two sites
+> **Gate.** All four operators `Succeeded` on **both** clusters.
 
-The VAN needs a one-time token transfer. On the **active** cluster the `AccessGrant` produces a Secret; the **passive** cluster consumes it as `odoo-active-token`.
+---
 
-```bash
-# --- Active cluster ---
-oc get accessgrant odoo-passive-grant -n odoo -o yaml    # confirm it is Ready
-oc get secret odoo-passive-grant -n odoo -o yaml > /tmp/token.yaml
+## Phase 3 — Secrets
 
-# Edit /tmp/token.yaml:
-#   metadata.name -> odoo-active-token
-#   remove: namespace, resourceVersion, uid, creationTimestamp, ownerReferences
+Three Secrets are deliberately not in Git. The namespace ApplicationSet has created `odoo` on both clusters by now.
 
-# --- Passive cluster ---
-oc apply -f /tmp/token.yaml -n odoo
-oc get accesstoken odoo-active-link -n odoo    # should redeem and go Ready
-```
-
-Confirm the link and the tunnelled service:
+Run on **both** clusters, with **identical values**:
 
 ```bash
-# Passive cluster
-oc get site,listener -n odoo
-oc get svc odoo-db-primary -n odoo
+oc project odoo
+
+# 1. Odoo admin credentials.
+#    Same on both clusters, so a failover does not change the login.
+oc create secret generic odoo-admin \
+  --from-literal=admin-password='<master password>' \
+  --from-literal=login-password='<admin login password>' \
+  -n odoo
+
+# 2. PostgreSQL replication user.
+#    CNPG creates the role on the active cluster from this Secret; the passive
+#    cluster authenticates with it. Must be a basic-auth Secret.
+oc create secret generic odoo-replicator \
+  --type=kubernetes.io/basic-auth \
+  --from-literal=username=replicator \
+  --from-literal=password='<replication password>' \
+  -n odoo
+
+# 3. Object storage for VolSync.
+#    Same bucket AND same RESTIC_PASSWORD on both, or the passive cluster
+#    cannot read the backups it is supposed to restore from.
+oc create secret generic volsync-restic-config \
+  --from-literal=AWS_ACCESS_KEY_ID='<key>' \
+  --from-literal=AWS_SECRET_ACCESS_KEY='<secret>' \
+  --from-literal=AWS_DEFAULT_REGION='us-east-1' \
+  --from-literal=RESTIC_REPOSITORY='s3:s3.amazonaws.com/<bucket>/odoo-filestore' \
+  --from-literal=RESTIC_PASSWORD='<strong passphrase - save this>' \
+  -n odoo
 ```
 
-## 8. Verify replication
+> Odoo CrashLoops until `odoo-admin` exists, and the passive database cannot bootstrap until `odoo-replicator` exists on both sides. Both are harmless if you are expecting them.
+
+For production, replace these with Sealed Secrets or External Secrets Operator — see [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## Phase 4 — Bring the active site up
+
+Let the active cluster settle before touching the passive one. The passive database bootstraps *from* the active primary, so there has to be something to copy.
+
+```bash
+# Active cluster
+oc get cluster odoo-db -n odoo
+oc get pods -n odoo
+```
+
+Confirm the synchronous local replica is genuinely synchronous — this is the Tier 1 promise:
+
+```bash
+oc exec -n odoo odoo-db-1 -- psql -U postgres -c \
+  "SELECT application_name, state, sync_state FROM pg_stat_replication;"
+```
+
+You want one row with `sync_state = sync`. If it says `async`, the second instance has not caught up yet — wait and re-check.
+
+Odoo's first boot initialises its base modules and takes several minutes; the readiness probe allows for it.
+
+```bash
+oc logs -f deployment/odoo -n odoo
+oc get route odoo -n odoo
+```
+
+> **Gate.** `odoo-db` reports healthy with both instances, one replica is `sync`, and Odoo answers on its route.
+
+---
+
+## Phase 5 — Link the two sites
+
+The passive database cannot bootstrap until it can reach the active primary, so this comes before Phase 6.
 
 ```bash
 # Active
-oc get cluster odoo-db -n odoo
-oc exec -n odoo odoo-db-1 -- psql -U postgres -c "SELECT application_name, state, sync_state FROM pg_stat_replication;"
+oc get site,connector,accessgrant -n odoo
+# Passive
+oc get site,listener -n odoo
 ```
 
-You should see the local synchronous replica **and** the remote standby.
+Transfer the token once:
 
 ```bash
-# Passive — replication lag
+# --- Active ---
+oc get secret odoo-passive-grant -n odoo -o yaml > /tmp/token.yaml
+
+# Edit /tmp/token.yaml:
+#   metadata.name  ->  odoo-active-token
+#   remove: namespace, resourceVersion, uid, creationTimestamp, ownerReferences
+
+# --- Passive ---
+oc apply -f /tmp/token.yaml -n odoo
+oc get accesstoken odoo-active-link -n odoo      # should redeem and go Ready
+```
+
+Prove the tunnel works from the passive side:
+
+```bash
+oc get svc odoo-db-primary -n odoo
+oc run pgcheck --rm -it --restart=Never -n odoo \
+  --image=ghcr.io/cloudnative-pg/postgresql:16.6 -- \
+  pg_isready -h odoo-db-primary -p 5432
+```
+
+> **Gate.** `odoo-db-primary` resolves and accepts connections from the passive cluster. If it does not, the passive `Cluster` will fail `pg_basebackup` repeatedly — noisy, but it recovers once the link is up.
+
+---
+
+## Phase 6 — Passive database, then Cloudflare
+
+The passive `Cluster` bootstraps from the primary and enters replica mode on its own once the link exists. If it has been failing while you set up Phase 5, give it a nudge:
+
+```bash
+oc delete cluster odoo-db -n odoo    # Argo CD recreates it immediately
+```
+
+Check it is replicating:
+
+```bash
+oc get cluster odoo-db -n odoo
 oc exec -n odoo odoo-db-1 -- psql -U postgres -c \
   "SELECT now() - pg_last_xact_replay_timestamp() AS lag;"
 ```
 
-## 9. Check Odoo
+Odoo on the passive cluster should be at **0 replicas** — that is correct, not a failure.
 
-```bash
-# Active
-oc get pods -n odoo            # odoo-* Running, odoo-db-1 and -2 Running
-oc get route odoo -n odoo
-```
-
-First boot initialises Odoo's base modules and can take several minutes; the readiness probe allows for it. Watch with `oc logs -f deployment/odoo -n odoo`.
-
-```bash
-# Passive — Odoo should be at 0 replicas, database running
-oc get deployment odoo -n odoo
-oc get cluster odoo-db -n odoo
-```
-
-## 10. Cloudflare load balancer
+### Cloudflare
 
 1. **Traffic → Load Balancing → Create**
-2. Add two origin pools, one per cluster route
+2. Two origin pools, one per cluster route
 3. Health check: HTTPS, path `/web/health`, expect 200, interval 60s, 3 retries
-4. Set the active pool first in priority order, passive as fallback
+4. Active pool first in priority order, passive as fallback
 5. Point your hostname at the load balancer
-6. Lower the DNS TTL — it dominates real RTO (see FAILOVER.md)
+6. Lower the DNS TTL — it dominates real RTO (see [FAILOVER.md](FAILOVER.md))
 
-Add both hostnames to Odoo's trusted proxy handling if you use a custom domain; `proxy_mode` is already enabled in the image.
-
-## 11. Optional — compliance policies
+### Optional — compliance policies
 
 ```bash
 oc apply -k policies/
@@ -233,8 +298,32 @@ oc apply -k policies/
 
 Results appear under **Governance** in the ACM console.
 
-## Done
+---
 
-From here, changes are made by editing this repo and committing. Argo CD reconciles within about three minutes.
+## Verify the whole thing
 
-For failover, see [FAILOVER.md](FAILOVER.md).
+| Check | Where | Expect |
+|---|---|---|
+| `oc get cluster odoo-db -n odoo` | active | healthy, 2 instances |
+| `pg_stat_replication` | active | one `sync` row (local) and one `async` row (passive) |
+| `oc get cluster odoo-db -n odoo` | passive | healthy, replica mode |
+| replay lag | passive | seconds |
+| `oc get deployment odoo -n odoo` | passive | `0/0` — correct |
+| `oc get replicationsource -n odoo` | active | syncing every 2 minutes |
+| Cloudflare health check | dashboard | active pool healthy |
+
+Then do the thing the demo does: create a record with an attachment on the active cluster, and confirm it arrives on the passive side within seconds.
+
+```bash
+# Run on both, compare
+oc exec -n odoo odoo-db-1 -- psql -U odoo -d odoo -c \
+  "SELECT count(*) FROM ir_attachment;"
+```
+
+---
+
+## From here
+
+Changes are made by editing this repo and committing. Argo CD reconciles within about three minutes.
+
+For failover, see [FAILOVER.md](FAILOVER.md) — including the short list of things to do before running a live demo.

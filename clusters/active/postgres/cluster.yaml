@@ -55,8 +55,11 @@ spec:
       random_page_cost: "1.1"
       effective_io_concurrency: "200"
     pg_hba:
-      # Allow the standby cluster to authenticate for streaming replication.
-      - host replication streaming_replica all scram-sha-256
+      # Allow the passive cluster's replication user in over the VAN.
+      # CNPG manages the built-in streaming_replica role with client
+      # certificates; rather than plumbing certs between clusters we declare
+      # our own password-authenticated replication role below.
+      - host replication replicator all scram-sha-256
 
     # Quorum synchronous replication to the LOCAL replica only.
     # The cross-cluster replica stays asynchronous by design.
@@ -64,6 +67,18 @@ spec:
       method: any
       number: 1
       dataDurability: required
+
+  # Replication role for the passive cluster.
+  # The password comes from the odoo-replicator Secret, which must exist with
+  # the SAME value on both clusters — created during bootstrap, not in Git.
+  managed:
+    roles:
+      - name: replicator
+        ensure: present
+        login: true
+        replication: true
+        passwordSecret:
+          name: odoo-replicator
 
   monitoring:
     enablePodMonitor: true

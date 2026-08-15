@@ -1,0 +1,135 @@
+---
+# Phase 1.2/1.3 — register both clusters with ACM, label them, and apply the
+# generated import manifests to each managed cluster.
+#
+# Runs against the hub to create the objects, then against each managed
+# cluster to apply the klusterlet manifests ACM generates for it.
+- name: Register the managed clusters with ACM
+  hosts: hub
+  gather_facts: false
+
+  tasks:
+    - name: Create a namespace per managed cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ hostvars[item].managed_cluster_name }}"
+      loop: "{{ groups['managed'] }}"
+
+    - name: Create the ManagedCluster objects with clusterset and role labels
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: cluster.open-cluster-management.io/v1
+          kind: ManagedCluster
+          metadata:
+            name: "{{ hostvars[item].managed_cluster_name }}"
+            labels:
+              cluster.open-cluster-management.io/clusterset: "{{ clusterset_name }}"
+              role: "{{ hostvars[item].cluster_role }}"
+          spec:
+            hubAcceptsClient: true
+      loop: "{{ groups['managed'] }}"
+
+    - name: Create the KlusterletAddonConfig for each cluster
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: agent.open-cluster-management.io/v1
+          kind: KlusterletAddonConfig
+          metadata:
+            name: "{{ hostvars[item].managed_cluster_name }}"
+            namespace: "{{ hostvars[item].managed_cluster_name }}"
+          spec:
+            clusterName: "{{ hostvars[item].managed_cluster_name }}"
+            clusterNamespace: "{{ hostvars[item].managed_cluster_name }}"
+            clusterLabels:
+              cloud: auto-detect
+              vendor: auto-detect
+            applicationManager:
+              enabled: true
+            policyController:
+              enabled: true
+            searchCollector:
+              enabled: true
+            certPolicyController:
+              enabled: true
+      loop: "{{ groups['managed'] }}"
+
+    - name: Wait for ACM to generate the import secret
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Secret
+        name: "{{ hostvars[item].managed_cluster_name }}-import"
+        namespace: "{{ hostvars[item].managed_cluster_name }}"
+      register: import_secrets
+      retries: 30
+      delay: 10
+      until: import_secrets.resources | length > 0
+      loop: "{{ groups['managed'] }}"
+
+    - name: Stash the import manifests for the managed clusters to consume
+      ansible.builtin.set_fact:
+        import_payloads: >-
+          {{ import_payloads | default({}) | combine({
+               item.item: {
+                 'crds': item.resources[0].data['crds.yaml'] | b64decode,
+                 'import': item.resources[0].data['import.yaml'] | b64decode
+               }
+             }) }}
+      loop: "{{ import_secrets.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+- name: Apply the import manifests on each managed cluster
+  hosts: managed
+  gather_facts: false
+
+  tasks:
+    - name: Apply the klusterlet CRDs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ item }}"
+      loop: >-
+        {{ hostvars[groups['hub'][0]].import_payloads[inventory_hostname].crds
+           | from_yaml_all | select('defined') | list }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+    - name: Apply the klusterlet import manifests
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ item }}"
+      loop: >-
+        {{ hostvars[groups['hub'][0]].import_payloads[inventory_hostname]['import']
+           | from_yaml_all | select('defined') | list }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
+
+- name: Confirm both clusters joined
+  hosts: hub
+  gather_facts: false
+
+  tasks:
+    - name: Wait for each ManagedCluster to report available
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: cluster.open-cluster-management.io/v1
+        kind: ManagedCluster
+        name: "{{ hostvars[item].managed_cluster_name }}"
+      register: mc
+      retries: 60
+      delay: 15
+      until: >-
+        mc.resources[0].status.conditions | default([])
+        | selectattr('type', 'equalto', 'ManagedClusterConditionAvailable')
+        | selectattr('status', 'equalto', 'True') | list | length > 0
+      loop: "{{ groups['managed'] }}"

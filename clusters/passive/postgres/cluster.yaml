@@ -35,11 +35,12 @@ spec:
         # Local Service published by the Interconnect Listener.
         host: odoo-db-primary
         port: "5432"
-        user: streaming_replica
+        user: replicator
         dbname: odoo
         sslmode: require
       password:
-        name: odoo-db-replication
+        # Same Secret, same value, as on the active cluster.
+        name: odoo-replicator
         key: password
 
   storage:

@@ -1,0 +1,88 @@
+---
+# Phase 5 — transfer the Service Interconnect token from active to passive
+# and verify the tunnel carries PostgreSQL.
+#
+# Re-runnable: use it to rotate the link when the AccessGrant expires.
+- name: Export the access token from the active cluster
+  hosts: active
+  gather_facts: false
+
+  tasks:
+    - name: Wait for the AccessGrant secret to be issued
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Secret
+        name: odoo-passive-grant
+        namespace: "{{ odoo_namespace }}"
+      register: grant
+      retries: 30
+      delay: 10
+      until: grant.resources | length > 0
+
+    - name: Keep only the fields the passive cluster needs
+      ansible.builtin.set_fact:
+        token_payload:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: odoo-active-token
+            namespace: "{{ odoo_namespace }}"
+            labels: "{{ grant.resources[0].metadata.labels | default({}) }}"
+            annotations: "{{ grant.resources[0].metadata.annotations | default({}) }}"
+          type: "{{ grant.resources[0].type | default('Opaque') }}"
+          data: "{{ grant.resources[0].data }}"
+
+- name: Redeem the token on the passive cluster
+  hosts: passive
+  gather_facts: false
+
+  tasks:
+    - name: Apply the token secret
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition: "{{ hostvars['active'].token_payload }}"
+
+    - name: Wait for the AccessToken to be redeemed
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: AccessToken
+        name: odoo-active-link
+        namespace: "{{ odoo_namespace }}"
+      register: token
+      retries: 30
+      delay: 10
+      until: >-
+        token.resources | length > 0 and
+        (token.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Redeemed')
+          | selectattr('status', 'equalto', 'True') | list | length > 0)
+
+    - name: Wait for the tunnelled primary service to appear
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Service
+        name: odoo-db-primary
+        namespace: "{{ odoo_namespace }}"
+      register: tunnel_svc
+      retries: 30
+      delay: 10
+      until: tunnel_svc.resources | length > 0
+
+    - name: Prove PostgreSQL answers across the VAN
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ odoo_namespace }}"
+        pod: odoo-db-1
+        command: pg_isready -h odoo-db-primary -p 5432
+      register: tunnel_check
+      failed_when: false
+      changed_when: false
+
+    - name: Report the tunnel check
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'Tunnel OK — the standby can reach the primary.'
+             if tunnel_check.rc | default(1) == 0
+             else 'Tunnel not answering yet. The standby will retry pg_basebackup; re-run this play if it persists.' }}

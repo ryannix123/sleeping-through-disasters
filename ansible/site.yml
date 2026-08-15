@@ -1,0 +1,15 @@
+---
+# Full build, in dependency order. Each playbook is also runnable on its own.
+#
+#   ansible-playbook site.yml
+#
+# Prerequisite: playbooks/00-generate-secrets.yml has been run and the vault
+# has real S3 and Cloudflare values in it.
+
+- ansible.builtin.import_playbook: playbooks/01-hub-operators.yml
+- ansible.builtin.import_playbook: playbooks/02-import-clusters.yml
+- ansible.builtin.import_playbook: playbooks/03-deploy-gitops.yml
+- ansible.builtin.import_playbook: playbooks/04-secrets.yml
+- ansible.builtin.import_playbook: playbooks/05-interconnect-link.yml
+- ansible.builtin.import_playbook: playbooks/06-cloudflare.yml
+- ansible.builtin.import_playbook: playbooks/99-verify.yml

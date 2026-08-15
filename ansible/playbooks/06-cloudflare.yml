@@ -1,0 +1,169 @@
+---
+# Phase 6b — Cloudflare Load Balancing.
+#
+# There is no Ansible module for Cloudflare load balancers (community.general
+# covers DNS records only), so this drives the v4 REST API directly. Order
+# matters: a monitor must exist before a pool can reference it, and both
+# pools must exist before the load balancer can order them.
+#
+# Idempotent by lookup-then-create: each object is searched for by name first.
+- name: Configure Cloudflare load balancing
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    cf_api: "https://api.cloudflare.com/client/v4"
+    cf_headers:
+      Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+      Content-Type: "application/json"
+    monitor_description: "odoo-dr {{ cloudflare_monitor_path }}"
+    active_pool_name: "odoo-active"
+    passive_pool_name: "odoo-passive"
+    lb_name: "{{ cloudflare_hostname }}"
+
+  tasks:
+    - name: Collect the OpenShift route for each cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ hostvars[item].kubeconfig }}"
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: odoo
+        namespace: "{{ odoo_namespace }}"
+      register: routes
+      loop: "{{ groups['managed'] }}"
+
+    - name: Map cluster role to route hostname
+      ansible.builtin.set_fact:
+        route_hosts: >-
+          {{ route_hosts | default({}) | combine({
+               hostvars[item.item].cluster_role: item.resources[0].spec.host
+             }) }}
+      loop: "{{ routes.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ── Monitor ─────────────────────────────────────────────────────────────
+    - name: List existing monitors
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/monitors"
+        headers: "{{ cf_headers }}"
+        method: GET
+      register: cf_monitors
+
+    - name: Create the health monitor
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/monitors"
+        headers: "{{ cf_headers }}"
+        method: POST
+        status_code: [200, 201]
+        body_format: json
+        body:
+          type: https
+          method: GET
+          path: "{{ cloudflare_monitor_path }}"
+          expected_codes: "200"
+          interval: "{{ cloudflare_monitor_interval }}"
+          retries: "{{ cloudflare_monitor_retries }}"
+          timeout: 5
+          follow_redirects: true
+          description: "{{ monitor_description }}"
+      register: cf_monitor_created
+      when: >-
+        cf_monitors.json.result | selectattr('description', 'equalto', monitor_description)
+        | list | length == 0
+
+    - name: Resolve the monitor id
+      ansible.builtin.set_fact:
+        monitor_id: >-
+          {{ cf_monitor_created.json.result.id
+             if cf_monitor_created.changed | default(false)
+             else (cf_monitors.json.result
+                   | selectattr('description', 'equalto', monitor_description)
+                   | first).id }}
+
+    # ── Pools ───────────────────────────────────────────────────────────────
+    - name: List existing pools
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/pools"
+        headers: "{{ cf_headers }}"
+        method: GET
+      register: cf_pools
+
+    - name: Create a pool per cluster
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/pools"
+        headers: "{{ cf_headers }}"
+        method: POST
+        status_code: [200, 201]
+        body_format: json
+        body:
+          name: "{{ item.name }}"
+          description: "odoo-dr {{ item.role }} cluster"
+          enabled: true
+          monitor: "{{ monitor_id }}"
+          origins:
+            - name: "{{ item.role }}"
+              address: "{{ route_hosts[item.role] }}"
+              enabled: true
+      register: cf_pool_created
+      when: >-
+        cf_pools.json.result | selectattr('name', 'equalto', item.name)
+        | list | length == 0
+      loop:
+        - { name: "{{ active_pool_name }}", role: active }
+        - { name: "{{ passive_pool_name }}", role: passive }
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Re-list pools so ids are known
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/pools"
+        headers: "{{ cf_headers }}"
+        method: GET
+      register: cf_pools_final
+
+    - name: Resolve pool ids
+      ansible.builtin.set_fact:
+        active_pool_id: >-
+          {{ (cf_pools_final.json.result | selectattr('name', 'equalto', active_pool_name) | first).id }}
+        passive_pool_id: >-
+          {{ (cf_pools_final.json.result | selectattr('name', 'equalto', passive_pool_name) | first).id }}
+
+    # ── Load balancer ───────────────────────────────────────────────────────
+    - name: List existing load balancers
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/zones/{{ vault_cloudflare_zone_id }}/load_balancers"
+        headers: "{{ cf_headers }}"
+        method: GET
+      register: cf_lbs
+
+    - name: Create the failover load balancer
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/zones/{{ vault_cloudflare_zone_id }}/load_balancers"
+        headers: "{{ cf_headers }}"
+        method: POST
+        status_code: [200, 201]
+        body_format: json
+        body:
+          name: "{{ lb_name }}"
+          description: "Sleeping Through Disasters — active/passive failover"
+          enabled: true
+          proxied: true
+          ttl: "{{ cloudflare_lb_ttl }}"
+          # Priority order: active first, passive only when active is unhealthy.
+          default_pools:
+            - "{{ active_pool_id }}"
+            - "{{ passive_pool_id }}"
+          fallback_pool: "{{ passive_pool_id }}"
+      when: >-
+        cf_lbs.json.result | selectattr('name', 'equalto', lb_name)
+        | list | length == 0
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "Hostname:      {{ cloudflare_hostname }}"
+          - "Active pool:   {{ route_hosts.active }}"
+          - "Passive pool:  {{ route_hosts.passive }}"
+          - "Health check:  {{ cloudflare_monitor_path }} every {{ cloudflare_monitor_interval }}s, {{ cloudflare_monitor_retries }} retries"
+          - "DNS TTL:       {{ cloudflare_lb_ttl }}s — this is the floor under your RTO"
