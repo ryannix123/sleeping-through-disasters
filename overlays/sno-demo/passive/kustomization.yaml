@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: odoo
+
+# ── SNO demo overlay: PASSIVE site (AWS Single Node OpenShift) ──────────────
+#
+# This cluster also runs the ACM hub in the demo topology. That is a demo
+# compromise, not the pattern: in production the hub is independent. Putting
+# it here rather than on the active side is deliberate — when the active site
+# is killed, the management plane survives to drive the promotion.
+#
+# The passive base already runs a single PostgreSQL instance in replica mode,
+# so there is no synchronous block to remove. This overlay only trims
+# resources to share the node with ACM.
+
+resources:
+  - ../../../clusters/passive/postgres
+  - ../../../clusters/passive/interconnect
+  - ../../../clusters/passive/odoo
+  - ../../../clusters/passive/volsync
+
+patches:
+  - target:
+      group: postgresql.cnpg.io
+      kind: Cluster
+      name: odoo-db
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/resources/requests/memory
+        value: 512Mi
+      - op: replace
+        path: /spec/resources/limits/memory
+        value: 2Gi
+
+  # Odoo is at 0 replicas until failover, but these apply when it scales up.
+  - target:
+      kind: Deployment
+      name: odoo
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 3Gi

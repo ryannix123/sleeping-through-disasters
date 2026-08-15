@@ -18,6 +18,11 @@ The earlier iteration of this pattern deployed with shell scripts run separately
 
 It also makes failover auditable. Promotion is a commit with an author, a timestamp and a diff, rather than a command someone typed at 3am.
 
+> **Running this on Single Node OpenShift?** Tier 1 below needs more than one
+> node, and the synchronous block will hang writes on a single-node cluster if
+> left in place. See [DEMO-TOPOLOGY.md](DEMO-TOPOLOGY.md) and the
+> `overlays/sno-demo/` overlay.
+
 ## Two-tier database replication
 
 ### Tier 1 — synchronous, in-cluster

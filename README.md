@@ -92,12 +92,14 @@ sleeping-through-disasters/
 │   └── passive/              Replica DB, Listener, Odoo ×0, VolSync Destination
 │
 ├── ansible/                  Build-time automation (hub, secrets, link, Cloudflare)
+├── overlays/sno-demo/        Single-node demo variant (see docs/DEMO-TOPOLOGY.md)
 ├── container/                Odoo image (forked, DR-adjusted)
 ├── .github/workflows/        Image build + manifest validation
 ├── policies/                 ACM compliance policies
 └── docs/
     ├── ARCHITECTURE.md       Design decisions and trade-offs
     ├── BOOTSTRAP.md          Step-by-step first deployment
+    ├── DEMO-TOPOLOGY.md      Running it on two single-node clusters
     └── FAILOVER.md           DR runbook
 ```
 

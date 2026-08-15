@@ -1,0 +1,81 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: odoo
+
+# ── SNO demo overlay: ACTIVE site (homelab, Single Node OpenShift) ──────────
+#
+# The base under clusters/active/ describes the full pattern: two PostgreSQL
+# instances with synchronous in-cluster replication (Tier 1). That needs more
+# than one node, so this overlay collapses it for a single-node demo and
+# leaves the cross-region tier (Tier 2) intact — which is what the demo
+# actually proves.
+#
+# WHY THE SYNCHRONOUS BLOCK MUST GO:
+# With instances: 1 and dataDurability: required, PostgreSQL waits forever for
+# a standby that will never exist. Writes block indefinitely and Odoo appears
+# frozen. Removing the block is not optional on a single node.
+
+resources:
+  - ../../../clusters/active/postgres
+  - ../../../clusters/active/interconnect
+  - ../../../clusters/active/odoo
+  - ../../../clusters/active/volsync
+
+patches:
+  # ── PostgreSQL: single instance, no synchronous replication ──────────────
+  - target:
+      group: postgresql.cnpg.io
+      kind: Cluster
+      name: odoo-db
+    patch: |-
+      - op: replace
+        path: /spec/instances
+        value: 1
+      - op: remove
+        path: /spec/postgresql/synchronous
+      - op: replace
+        path: /spec/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/resources/requests/memory
+        value: 512Mi
+      - op: replace
+        path: /spec/resources/limits/memory
+        value: 2Gi
+
+  # ── VolSync: point at the LVM Storage snapshot class ─────────────────────
+  # LVM Storage provisions thin volumes precisely so snapshots work, and
+  # creates a StorageClass and VolumeSnapshotClass both named lvms-vg1.
+  # VolSync will not reliably pick these up on its own, so name them.
+  #
+  # If your LVMCluster uses a raidConfig device class, thin provisioning and
+  # therefore snapshots are unavailable — change copyMethod to Direct instead.
+  - target:
+      group: volsync.backube
+      kind: ReplicationSource
+      name: odoo-data-backup
+    patch: |-
+      - op: add
+        path: /spec/restic/storageClassName
+        value: lvms-vg1
+      - op: add
+        path: /spec/restic/volumeSnapshotClassName
+        value: lvms-vg1
+      - op: add
+        path: /spec/restic/cacheStorageClassName
+        value: lvms-vg1
+
+  # ── Odoo: trim requests so it schedules comfortably on one node ──────────
+  - target:
+      kind: Deployment
+      name: odoo
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 3Gi
