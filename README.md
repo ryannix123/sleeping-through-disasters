@@ -41,28 +41,11 @@ Red Hat is not a database vendor, so the database operator is the one CNCF compo
 
 ## Architecture
 
-```
-                        ┌────────────────────────────────┐
-                        │   Hub Cluster (ACM + GitOps)   │
-                        │   Watches this repo →          │
-                        │   ApplicationSets → Argo CD    │
-                        └───────────────┬────────────────┘
-                      reconciles        │        reconciles
-              ┌──────────────────────────┴──────────────────────────┐
-              ▼                                                     ▼
-   ┌────────────────────────┐                        ┌────────────────────────┐
-   │  ACTIVE  (role=active) │                        │ PASSIVE (role=passive) │
-   │  hyperscaler A         │                        │ hyperscaler B          │
-   │                        │                        │                        │
-   │  Odoo         × 1      │                        │  Odoo         × 0      │
-   │  CNPG primary + sync   │◀── WAL over the VAN ──▶│  CNPG replica cluster  │
-   │  Interconnect Site     │    (mTLS, outbound)    │  Interconnect Site     │
-   │  VolSync Source ───────┼──▶  object storage ◀───┼── VolSync Destination  │
-   └────────────────────────┘                        └────────────────────────┘
-              ▲                                                     ▲
-              └───────────── Cloudflare load balancer ──────────────┘
-                       health checks → automatic traffic failover
-```
+<p align="center">
+  <img src="images/architecture-diagram.svg" alt="Sleeping Through Disasters architecture: two OpenShift clusters across two hyperscalers, with CloudNativePG two-tier replication over Red Hat Service Interconnect, VolSync and OADP to object storage, and Cloudflare traffic failover" width="100%">
+</p>
+
+The diagram shows the full pattern. Two things worth reading off it: the database is protected in **two tiers** — synchronous between the local instances on the active cluster (RPO ≈ 0 for a node or AZ loss) and asynchronous across the Service Interconnect VAN to the passive cluster (seconds of RPO for a region loss, and it never blocks a production write) — and the **hub rides with the passive site**, so the management plane survives the outage it has to respond to. On a single-node demo the in-cluster tier folds to one instance; see [docs/DEMO-TOPOLOGY.md](docs/DEMO-TOPOLOGY.md).
 
 ## Two-tier database replication
 

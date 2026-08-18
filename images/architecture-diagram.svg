@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1000" font-family="'Red Hat Display','Red Hat Text',Arial,sans-serif">
+  <defs>
+    <!-- Red Hat palette -->
+    <!-- RH Red EE0000 · RH black 151515 · RH grey 6A6E73 · light F2F2F2 · tint FAEAEA -->
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#151515"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#EE0000"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#0066CC"/>
+    </marker>
+    <filter id="shadow" x="-4%" y="-4%" width="108%" height="112%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#151515" flood-opacity="0.14"/>
+    </filter>
+  </defs>
+
+  <!-- Canvas -->
+  <rect width="1400" height="1000" fill="#FFFFFF"/>
+
+  <!-- Title block -->
+  <rect x="0" y="0" width="1400" height="8" fill="#EE0000"/>
+  <text x="60" y="58" font-size="30" font-weight="700" fill="#151515">Sleeping Through Disasters</text>
+  <text x="60" y="86" font-size="16" fill="#6A6E73">Odoo kept continuously available across a cloud-region loss — two OpenShift clusters, two hyperscalers, one control plane</text>
+
+  <!-- ============ GIT + HUB (management plane) ============ -->
+  <!-- Git -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="130" width="200" height="70" rx="8" fill="#151515"/>
+  </g>
+  <text x="160" y="163" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">Git repository</text>
+  <text x="160" y="184" font-size="12" fill="#C7C7C7" text-anchor="middle">desired state · GitOps</text>
+
+  <!-- Hub -->
+  <g filter="url(#shadow)">
+    <rect x="330" y="120" width="360" height="92" rx="8" fill="#FFFFFF" stroke="#EE0000" stroke-width="2.5"/>
+  </g>
+  <text x="510" y="150" font-size="16" font-weight="700" fill="#151515" text-anchor="middle">Hub cluster — management plane</text>
+  <g font-size="12.5" fill="#151515">
+    <rect x="348" y="164" width="150" height="30" rx="4" fill="#FAEAEA"/>
+    <text x="423" y="184" text-anchor="middle">Red Hat ACM</text>
+    <rect x="512" y="164" width="160" height="30" rx="4" fill="#FAEAEA"/>
+    <text x="592" y="184" text-anchor="middle">OpenShift GitOps</text>
+  </g>
+
+  <!-- Git -> Hub -->
+  <line x1="260" y1="165" x2="326" y2="165" stroke="#151515" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="293" y="157" font-size="10.5" fill="#6A6E73" text-anchor="middle">watches</text>
+
+  <!-- Hub note: co-located with passive -->
+  <text x="510" y="232" font-size="11.5" fill="#6A6E73" text-anchor="middle" font-style="italic">In the demo the hub rides with the passive site so it survives the outage it must respond to</text>
+
+  <!-- Hub reconciles both clusters -->
+  <path d="M440,212 C440,300 300,300 300,362" fill="none" stroke="#EE0000" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrowRed)"/>
+  <path d="M600,212 C600,300 1090,300 1090,362" fill="none" stroke="#EE0000" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrowRed)"/>
+  <text x="360" y="292" font-size="10.5" fill="#EE0000">reconciles</text>
+  <text x="980" y="292" font-size="10.5" fill="#EE0000">reconciles</text>
+
+  <!-- ============ ACTIVE CLUSTER ============ -->
+  <g filter="url(#shadow)">
+    <rect x="60" y="370" width="560" height="470" rx="10" fill="#FFFFFF" stroke="#151515" stroke-width="1.5"/>
+  </g>
+  <rect x="60" y="370" width="560" height="46" rx="10" fill="#151515"/>
+  <rect x="60" y="398" width="560" height="18" fill="#151515"/>
+  <text x="84" y="400" font-size="17" font-weight="700" fill="#FFFFFF">Active cluster</text>
+  <text x="604" y="400" font-size="13" fill="#FFFFFF" text-anchor="end">role=active · hyperscaler A / homelab</text>
+
+  <!-- Odoo active -->
+  <g filter="url(#shadow)">
+    <rect x="86" y="440" width="230" height="86" rx="8" fill="#FAEAEA" stroke="#EE0000" stroke-width="1.5"/>
+  </g>
+  <text x="201" y="470" font-size="15" font-weight="700" fill="#151515" text-anchor="middle">Odoo 19</text>
+  <text x="201" y="492" font-size="12.5" fill="#151515" text-anchor="middle">1 replica · serving users</text>
+  <text x="201" y="511" font-size="11" fill="#6A6E73" text-anchor="middle">filestore on PVC</text>
+
+  <!-- CNPG primary -->
+  <g filter="url(#shadow)">
+    <rect x="86" y="548" width="230" height="130" rx="8" fill="#FFFFFF" stroke="#0066CC" stroke-width="1.5"/>
+  </g>
+  <text x="201" y="574" font-size="14.5" font-weight="700" fill="#151515" text-anchor="middle">CloudNativePG</text>
+  <text x="201" y="593" font-size="12" fill="#0066CC" text-anchor="middle" font-weight="700">primary</text>
+  <rect x="104" y="606" width="90" height="56" rx="5" fill="#E7F1FB"/>
+  <text x="149" y="627" font-size="11" fill="#151515" text-anchor="middle">instance 1</text>
+  <text x="149" y="643" font-size="9.5" fill="#6A6E73" text-anchor="middle">primary</text>
+  <rect x="208" y="606" width="90" height="56" rx="5" fill="#E7F1FB"/>
+  <text x="253" y="627" font-size="11" fill="#151515" text-anchor="middle">instance 2</text>
+  <text x="253" y="643" font-size="9.5" fill="#6A6E73" text-anchor="middle">sync replica</text>
+  <!-- sync arrow between instances -->
+  <line x1="196" y1="634" x2="206" y2="634" stroke="#0066CC" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  <text x="201" y="676" font-size="10" fill="#6A6E73" text-anchor="middle">Tier 1 · synchronous · RPO ≈ 0 (node/AZ)</text>
+
+  <!-- VolSync source -->
+  <g filter="url(#shadow)">
+    <rect x="340" y="440" width="256" height="86" rx="8" fill="#FFFFFF" stroke="#6A6E73" stroke-width="1.3"/>
+  </g>
+  <text x="468" y="470" font-size="14" font-weight="700" fill="#151515" text-anchor="middle">VolSync</text>
+  <text x="468" y="490" font-size="12" fill="#151515" text-anchor="middle">ReplicationSource</text>
+  <text x="468" y="509" font-size="10.5" fill="#6A6E73" text-anchor="middle">filestore → object storage · every 2 min</text>
+
+  <!-- Interconnect active -->
+  <g filter="url(#shadow)">
+    <rect x="340" y="548" width="256" height="130" rx="8" fill="#FFFFFF" stroke="#6A6E73" stroke-width="1.3"/>
+  </g>
+  <text x="468" y="574" font-size="14" font-weight="700" fill="#151515" text-anchor="middle">Service Interconnect</text>
+  <text x="468" y="593" font-size="11.5" fill="#6A6E73" text-anchor="middle">Skupper Site</text>
+  <rect x="358" y="606" width="220" height="30" rx="4" fill="#F2F2F2"/>
+  <text x="468" y="626" font-size="11.5" fill="#151515" text-anchor="middle">Connector → publishes primary</text>
+  <text x="468" y="662" font-size="10" fill="#6A6E73" text-anchor="middle">outbound HTTPS · mTLS · no VPN</text>
+
+  <!-- OADP strip active -->
+  <rect x="86" y="700" width="510" height="30" rx="5" fill="#F2F2F2"/>
+  <text x="341" y="720" font-size="11.5" fill="#151515" text-anchor="middle">OADP (Velero) — namespace backup → object storage</text>
+
+  <!-- storage note -->
+  <text x="341" y="758" font-size="11" fill="#6A6E73" text-anchor="middle">CloudNativePG runs on any CSI driver — no storage-vendor lock-in</text>
+  <text x="341" y="778" font-size="11" fill="#6A6E73" text-anchor="middle">Red Hat + CNCF components only</text>
+
+  <!-- ============ PASSIVE CLUSTER ============ -->
+  <g filter="url(#shadow)">
+    <rect x="820" y="370" width="520" height="470" rx="10" fill="#FFFFFF" stroke="#151515" stroke-width="1.5"/>
+  </g>
+  <rect x="820" y="370" width="520" height="46" rx="10" fill="#6A6E73"/>
+  <rect x="820" y="398" width="520" height="18" fill="#6A6E73"/>
+  <text x="844" y="400" font-size="17" font-weight="700" fill="#FFFFFF">Passive cluster  +  hub</text>
+  <text x="1316" y="400" font-size="13" fill="#FFFFFF" text-anchor="end">role=passive · hyperscaler B / AWS</text>
+
+  <!-- Odoo passive -->
+  <g filter="url(#shadow)">
+    <rect x="846" y="440" width="220" height="86" rx="8" fill="#F2F2F2" stroke="#6A6E73" stroke-width="1.3" stroke-dasharray="5 3"/>
+  </g>
+  <text x="956" y="470" font-size="15" font-weight="700" fill="#6A6E73" text-anchor="middle">Odoo 19</text>
+  <text x="956" y="492" font-size="12.5" fill="#6A6E73" text-anchor="middle">0 replicas · dormant</text>
+  <text x="956" y="511" font-size="11" fill="#6A6E73" text-anchor="middle">scales up on failover</text>
+
+  <!-- CNPG replica -->
+  <g filter="url(#shadow)">
+    <rect x="846" y="548" width="220" height="130" rx="8" fill="#FFFFFF" stroke="#0066CC" stroke-width="1.5"/>
+  </g>
+  <text x="956" y="574" font-size="14.5" font-weight="700" fill="#151515" text-anchor="middle">CloudNativePG</text>
+  <text x="956" y="593" font-size="12" fill="#0066CC" text-anchor="middle" font-weight="700">replica cluster</text>
+  <rect x="874" y="606" width="164" height="40" rx="5" fill="#E7F1FB"/>
+  <text x="956" y="631" font-size="11" fill="#151515" text-anchor="middle">standby instance</text>
+  <text x="956" y="668" font-size="10" fill="#6A6E73" text-anchor="middle">promote on failover → replica.enabled:false</text>
+
+  <!-- Interconnect passive -->
+  <g filter="url(#shadow)">
+    <rect x="1090" y="548" width="226" height="130" rx="8" fill="#FFFFFF" stroke="#6A6E73" stroke-width="1.3"/>
+  </g>
+  <text x="1203" y="574" font-size="14" font-weight="700" fill="#151515" text-anchor="middle">Service Interconnect</text>
+  <text x="1203" y="593" font-size="11.5" fill="#6A6E73" text-anchor="middle">Skupper Site</text>
+  <rect x="1108" y="606" width="190" height="30" rx="4" fill="#F2F2F2"/>
+  <text x="1203" y="626" font-size="11.5" fill="#151515" text-anchor="middle">Listener → odoo-db-primary</text>
+  <text x="1203" y="662" font-size="10" fill="#6A6E73" text-anchor="middle">local service tunnels to primary</text>
+
+  <!-- VolSync destination -->
+  <g filter="url(#shadow)">
+    <rect x="1090" y="440" width="226" height="86" rx="8" fill="#FFFFFF" stroke="#6A6E73" stroke-width="1.3"/>
+  </g>
+  <text x="1203" y="470" font-size="14" font-weight="700" fill="#151515" text-anchor="middle">VolSync</text>
+  <text x="1203" y="490" font-size="12" fill="#151515" text-anchor="middle">ReplicationDestination</text>
+  <text x="1203" y="509" font-size="10.5" fill="#6A6E73" text-anchor="middle">restores filestore on failover</text>
+
+  <!-- OADP strip passive -->
+  <rect x="846" y="700" width="470" height="30" rx="5" fill="#F2F2F2"/>
+  <text x="1081" y="720" font-size="11.5" fill="#151515" text-anchor="middle">OADP (Velero) — namespace restore from object storage</text>
+
+  <text x="1081" y="762" font-size="11" fill="#6A6E73" text-anchor="middle">Database standby always runs — you cannot pilot-light the data,</text>
+  <text x="1081" y="780" font-size="11" fill="#6A6E73" text-anchor="middle">only the compute in front of it</text>
+
+  <!-- ============ CROSS-CLUSTER: async replication ============ -->
+  <path d="M596,613 C700,613 716,613 840,613" fill="none" stroke="#0066CC" stroke-width="2.5" marker-end="url(#arrowBlue)"/>
+  <rect x="618" y="596" width="204" height="34" rx="6" fill="#E7F1FB" stroke="#0066CC" stroke-width="1"/>
+  <text x="720" y="612" font-size="11" font-weight="700" fill="#0066CC" text-anchor="middle">Tier 2 · async WAL stream</text>
+  <text x="720" y="625" font-size="9.5" fill="#0066CC" text-anchor="middle">seconds RPO · never blocks writes</text>
+
+  <!-- ============ OBJECT STORAGE ============ -->
+  <g filter="url(#shadow)">
+    <rect x="520" y="880" width="360" height="70" rx="8" fill="#151515"/>
+  </g>
+  <text x="700" y="912" font-size="15" font-weight="700" fill="#FFFFFF" text-anchor="middle">Object storage (S3-compatible)</text>
+  <text x="700" y="933" font-size="11.5" fill="#C7C7C7" text-anchor="middle">VolSync filestore · OADP namespace backups</text>
+  <!-- both VolSync to storage -->
+  <path d="M468,730 C468,810 600,810 600,876" fill="none" stroke="#6A6E73" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <path d="M1203,730 C1203,812 800,812 800,876" fill="none" stroke="#6A6E73" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <!-- ============ CLOUDFLARE / USERS ============ -->
+  <g filter="url(#shadow)">
+    <rect x="1030" y="120" width="310" height="92" rx="8" fill="#FFFFFF" stroke="#151515" stroke-width="1.5"/>
+  </g>
+  <text x="1185" y="150" font-size="16" font-weight="700" fill="#151515" text-anchor="middle">Cloudflare load balancer</text>
+  <text x="1185" y="172" font-size="12" fill="#151515" text-anchor="middle">health check /web/health</text>
+  <text x="1185" y="192" font-size="11" fill="#6A6E73" text-anchor="middle">automatic traffic failover · GSLB is pluggable</text>
+
+  <!-- users -->
+  <circle cx="880" cy="166" r="26" fill="#F2F2F2" stroke="#6A6E73" stroke-width="1.3"/>
+  <text x="880" y="163" font-size="11" fill="#151515" text-anchor="middle">users</text>
+  <text x="880" y="178" font-size="9" fill="#6A6E73" text-anchor="middle">browser</text>
+  <line x1="908" y1="166" x2="1026" y2="166" stroke="#151515" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Cloudflare to active (primary) and passive (fallback) -->
+  <!-- primary route: drops low under the hub note, then sweeps to the active cluster -->
+  <path d="M1120,212 C1120,326 360,300 300,362" fill="none" stroke="#EE0000" stroke-width="2.5" marker-end="url(#arrowRed)"/>
+  <rect x="404" y="318" width="104" height="20" rx="4" fill="#FFFFFF"/>
+  <text x="456" y="333" font-size="11" font-weight="700" fill="#EE0000" text-anchor="middle">primary route</text>
+  <path d="M1240,212 C1268,270 1180,306 1096,362" fill="none" stroke="#6A6E73" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="1258" y="300" font-size="10.5" fill="#6A6E73">fallback</text>
+
+  <!-- ============ LEGEND ============ -->
+  <g transform="translate(60,880)">
+    <text x="0" y="6" font-size="12" font-weight="700" fill="#151515">Legend</text>
+    <line x1="0" y1="24" x2="34" y2="24" stroke="#0066CC" stroke-width="2.5"/>
+    <text x="42" y="28" font-size="11" fill="#151515">PostgreSQL replication</text>
+    <line x1="0" y1="44" x2="34" y2="44" stroke="#EE0000" stroke-width="2.5"/>
+    <text x="42" y="48" font-size="11" fill="#151515">user traffic / GitOps</text>
+    <line x1="200" y1="24" x2="234" y2="24" stroke="#6A6E73" stroke-width="1.8"/>
+    <text x="242" y="28" font-size="11" fill="#151515">backup &amp; restore</text>
+    <line x1="200" y1="44" x2="234" y2="44" stroke="#6A6E73" stroke-width="1.8" stroke-dasharray="6 4"/>
+    <text x="242" y="48" font-size="11" fill="#151515">dormant / fallback path</text>
+  </g>
+</svg>
