@@ -28,10 +28,17 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Install kustomize
+      - name: Ensure kustomize is available
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
-            | bash -s -- /usr/local/bin
+          # ubuntu-latest ships kustomize preinstalled. Use it if present;
+          # only install when it's genuinely missing (the upstream installer
+          # refuses to overwrite an existing binary and exits 1).
+          if command -v kustomize >/dev/null 2>&1; then
+            echo "Using preinstalled kustomize: $(command -v kustomize)"
+          else
+            curl -fsSL "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" \
+              | bash -s -- /usr/local/bin
+          fi
           kustomize version
 
       - name: Build every kustomization
