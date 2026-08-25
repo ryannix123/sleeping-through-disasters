@@ -9,6 +9,7 @@
 #
 #   ansible-playbook site.yml
 
+- ansible.builtin.import_playbook: playbooks/00-preflight.yml
 - ansible.builtin.import_playbook: playbooks/01-hub-operators.yml
 - ansible.builtin.import_playbook: playbooks/02-verify-clusters.yml
 - ansible.builtin.import_playbook: playbooks/03-deploy-gitops.yml

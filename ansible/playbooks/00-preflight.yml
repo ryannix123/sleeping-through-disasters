@@ -1,0 +1,53 @@
+---
+# Preflight — fail fast if the hub is missing a prerequisite.
+#
+# The most common "nothing happened" failure is deploying the ApplicationSets
+# to a hub that has ACM but NOT OpenShift GitOps. Argo CD never picks them up
+# and the pattern silently does nothing. This play catches that up front.
+- name: Preflight checks on the hub
+  hosts: hub
+  gather_facts: false
+
+  tasks:
+    - name: Look for the OpenShift GitOps subscription
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+        namespace: openshift-operators
+      register: subs
+
+    - name: Look for the openshift-gitops namespace (operator-created)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: openshift-gitops
+      register: gitops_ns
+
+    - name: Assert OpenShift GitOps is present
+      ansible.builtin.assert:
+        that:
+          - >-
+            (subs.resources | selectattr('metadata.name','search','gitops') | list | length > 0)
+            or (gitops_ns.resources | length > 0)
+        fail_msg: >-
+          OpenShift GitOps (Argo CD) is not installed on this hub. ACM does not
+          install it automatically. Run playbooks/01-hub-operators.yml, or
+          install the Red Hat OpenShift GitOps operator from OperatorHub, then
+          re-run. Without it the ApplicationSets deploy nothing.
+        success_msg: "OpenShift GitOps is present on the hub."
+
+    - name: Look for ACM (MultiClusterHub)
+      kubernetes.core.k8s_info:
+        api_version: operator.open-cluster-management.io/v1
+        kind: MultiClusterHub
+      register: mch
+
+    - name: Assert ACM is running
+      ansible.builtin.assert:
+        that:
+          - mch.resources | length > 0
+          - mch.resources[0].status.phase | default('') == 'Running'
+        fail_msg: >-
+          No Running MultiClusterHub found. Install/So finish ACM on this hub
+          first (playbooks/01-hub-operators.yml).
+        success_msg: "ACM MultiClusterHub is Running."

@@ -99,6 +99,21 @@ oc label managedcluster <cluster-b> role=passive
 
 Three ACM `Placement` resources resolve those labels to clusters. Each ApplicationSet uses the `clusterDecisionResource` generator to create one Argo CD `Application` per matched cluster, pointed at the matching folder in this repo. Argo CD then reconciles continuously, so the passive site can never quietly drift out of readiness.
 
+## Prerequisites on the hub
+
+Two operators must be installed on the ACM hub **before** anything here works.
+ACM does **not** install OpenShift GitOps for you — they are separate operators,
+and the pattern is inert without Argo CD on the hub.
+
+| Operator | Why | Installed by |
+|---|---|---|
+| Advanced Cluster Management | The control plane — placements, policies, cluster fleet | you / the demo platform |
+| **OpenShift GitOps (Argo CD)** | **Reconciles the ApplicationSets to both clusters — without it, nothing deploys** | `ansible/playbooks/01-hub-operators.yml`, or install by hand |
+
+The Ansible layer's `01-hub-operators.yml` installs GitOps (and ACM) idempotently,
+so running that play covers you. If you deploy by hand, install the **Red Hat
+OpenShift GitOps** operator from OperatorHub on the hub first.
+
 ## Quick start
 
 Two ways in.

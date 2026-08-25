@@ -34,6 +34,12 @@ The steps are grouped into phases because several of them **fail confusingly if 
 
 ### 1.1 Install the hub operators
 
+> **OpenShift GitOps is not optional and not automatic.** ACM does not install
+> OpenShift GitOps — they are separate operators. Argo CD (from the GitOps
+> operator) is what reconciles the ApplicationSets to both clusters, so the
+> pattern deploys nothing without it. Both subscriptions are below; do not skip
+> the GitOps one.
+
 ```bash
 # OpenShift GitOps
 cat <<'EOF' | oc apply -f -

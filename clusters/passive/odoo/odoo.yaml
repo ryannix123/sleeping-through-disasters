@@ -124,6 +124,9 @@ spec:
                 secretKeyRef:
                   name: odoo-admin
                   key: login-password
+            # Passive is a database REPLICA — it must never initialise or seed
+            # its own data. It receives everything (including the active site's
+            # demo data) through PostgreSQL replication. Keep this at "all".
             - name: WITHOUT_DEMO
               value: "all"
             # Threaded mode. Raising this requires the longpolling route and

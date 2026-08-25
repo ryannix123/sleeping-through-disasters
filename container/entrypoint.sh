@@ -47,6 +47,9 @@ DB_PASSWORD="${DB_PASSWORD:-odoo}"
 DB_NAME="${DB_NAME:-odoo}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"           # Odoo "master" password
 WITHOUT_DEMO="${WITHOUT_DEMO:-all}"
+# Modules installed on first boot. For a populated demo, set this to something
+# like base,contacts,sale_management,account,stock and set WITHOUT_DEMO=False.
+INITIAL_MODULES="${INITIAL_MODULES:-base}"
 WORKERS="${WORKERS:-0}"
 LIST_DB="${LIST_DB:-False}"
 
@@ -160,8 +163,8 @@ if [ "${1:-odoo}" = "odoo" ]; then
     if db_initialized; then
         echo ">> Existing Odoo database detected — skipping initialisation."
     else
-        echo ">> Fresh database — initialising base modules (demo data: ${WITHOUT_DEMO})."
-        odoo -c "${CONF}" -d "${DB_NAME}" -i base \
+        echo ">> Fresh database — installing: ${INITIAL_MODULES} (demo data: ${WITHOUT_DEMO})."
+        odoo -c "${CONF}" -d "${DB_NAME}" -i "${INITIAL_MODULES}" \
             --without-demo="${WITHOUT_DEMO}" --stop-after-init
 
         ADMIN_LOGIN_PASSWORD="${ADMIN_LOGIN_PASSWORD:-admin}"

@@ -124,8 +124,18 @@ spec:
                 secretKeyRef:
                   name: odoo-admin
                   key: login-password
+            # Load Odoo's built-in demo data (customers, quotations, invoices,
+            # products) so the instance looks like a real business on day one.
+            # "False" means "do NOT run without demo" — i.e. demo data loads.
+            # This runs ONLY on first init of the active database; the passive
+            # site is a replica and never initialises its own data.
             - name: WITHOUT_DEMO
-              value: "all"
+              value: "False"
+            # Install the functional modules whose demo data is worth showing.
+            # base alone carries almost none; these give a populated CRM/sales
+            # instance. Trim or extend to taste.
+            - name: INITIAL_MODULES
+              value: "base,contacts,sale_management,account,stock"
             # Threaded mode. Raising this requires the longpolling route and
             # a ReadWriteMany filestore (see docs/ARCHITECTURE.md).
             - name: WORKERS
