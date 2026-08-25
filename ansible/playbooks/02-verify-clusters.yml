@@ -1,0 +1,36 @@
+---
+# Cluster import is done through the ACM console. This play just confirms, from
+# the hub, that ACM sees both managed clusters, that they are labeled correctly
+# for the placements, and that they are Ready.
+- name: Verify managed clusters are ready and labeled
+  hosts: hub
+  gather_facts: false
+
+  tasks:
+    - name: Fetch both ManagedClusters
+      kubernetes.core.k8s_info:
+        api_version: cluster.open-cluster-management.io/v1
+        kind: ManagedCluster
+        name: "{{ item }}"
+      register: mc
+      loop:
+        - "{{ active_cluster_name }}"
+        - "{{ passive_cluster_name }}"
+
+    - name: Assert each cluster is Ready and carries the right labels
+      ansible.builtin.assert:
+        that:
+          - item.resources | length == 1
+          - >-
+            item.resources[0].status.conditions | default([])
+            | selectattr('type','equalto','ManagedClusterConditionAvailable')
+            | selectattr('status','equalto','True') | list | length == 1
+          - item.resources[0].metadata.labels['cluster.open-cluster-management.io/clusterset'] == clusterset_name
+          - item.resources[0].metadata.labels['role'] in ['active','passive']
+        fail_msg: >-
+          {{ item.item }} is not Ready or is missing role / clusterset labels.
+          Fix in the ACM console before deploying.
+        success_msg: "{{ item.item }} — Ready, clusterset={{ clusterset_name }}, role={{ item.resources[0].metadata.labels['role'] }}"
+      loop: "{{ mc.results }}"
+      loop_control:
+        label: "{{ item.item }}"

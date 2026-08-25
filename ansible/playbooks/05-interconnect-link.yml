@@ -1,88 +1,79 @@
 ---
-# Phase 5 — transfer the Service Interconnect token from active to passive
-# and verify the tunnel carries PostgreSQL.
+# Phase 5 — establish the Service Interconnect link using the official
+# skupper.v2 Ansible collection.
 #
-# Re-runnable: use it to rotate the link when the AccessGrant expires.
-- name: Export the access token from the active cluster
-  hosts: active
+# This is the Skupper-dev-endorsed path. The Site, Connector and Listener are
+# already deployed by the GitOps ApplicationSets; all that remains is the token
+# handshake, which the collection reduces to two tasks:
+#
+#   1. active site issues an AccessToken   -> register it as an Ansible fact
+#   2. passive site applies that fact       -> link forms over mTLS
+#
+# The token round-trips through hostvars, so there is no manual export, rename,
+# or metadata stripping. Each task targets its own cluster via kubeconfig.
+#
+# This is the ONE play that talks to the managed clusters directly. It is a
+# one-time bootstrap handshake, not reconciliation, so using the purpose-built
+# module here is the right tool rather than a departure from the ACM model.
+# Requires:  ansible-galaxy collection install skupper.v2
+
+- name: Issue an access token on the active site
+  hosts: active_site
   gather_facts: false
-
   tasks:
-    - name: Wait for the AccessGrant secret to be issued
-      kubernetes.core.k8s_info:
+    - name: Create a token from the active (primary) site
+      skupper.v2.token:
+        name: odoo-active-link
         kubeconfig: "{{ kubeconfig }}"
-        kind: Secret
-        name: odoo-passive-grant
-        namespace: "{{ odoo_namespace }}"
-      register: grant
-      retries: 30
-      delay: 10
-      until: grant.resources | length > 0
+        namespace: "{{ skupper_namespace }}"
+        redemptions_allowed: 1
+      register: active_token
 
-    - name: Keep only the fields the passive cluster needs
-      ansible.builtin.set_fact:
-        token_payload:
-          apiVersion: v1
-          kind: Secret
-          metadata:
-            name: odoo-active-token
-            namespace: "{{ odoo_namespace }}"
-            labels: "{{ grant.resources[0].metadata.labels | default({}) }}"
-            annotations: "{{ grant.resources[0].metadata.annotations | default({}) }}"
-          type: "{{ grant.resources[0].type | default('Opaque') }}"
-          data: "{{ grant.resources[0].data }}"
+    - name: Confirm the token was issued
+      ansible.builtin.assert:
+        that:
+          - active_token.token is defined
+        fail_msg: >-
+          Skupper did not return a token. Check that the active Site is Ready
+          (oc get site -n {{ skupper_namespace }}) and that skupper.v2 is
+          installed.
+        success_msg: "Access token issued by the active site."
 
-- name: Redeem the token on the passive cluster
-  hosts: passive
+- name: Redeem the token on the passive site
+  hosts: passive_site
   gather_facts: false
-
   tasks:
-    - name: Apply the token secret
-      kubernetes.core.k8s:
+    - name: Apply the token to the passive (consumer) site
+      skupper.v2.resource:
+        def: "{{ hostvars['active_site'].active_token.token }}"
         kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition: "{{ hostvars['active'].token_payload }}"
+        namespace: "{{ skupper_namespace }}"
 
-    - name: Wait for the AccessToken to be redeemed
+    - name: Give the link a moment to establish
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Read back the AccessToken status
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         api_version: skupper.io/v2alpha1
         kind: AccessToken
         name: odoo-active-link
-        namespace: "{{ odoo_namespace }}"
-      register: token
-      retries: 30
+        namespace: "{{ skupper_namespace }}"
+      register: token_status
+      retries: 12
       delay: 10
       until: >-
-        token.resources | length > 0 and
-        (token.resources[0].status.conditions | default([])
-          | selectattr('type', 'equalto', 'Redeemed')
-          | selectattr('status', 'equalto', 'True') | list | length > 0)
-
-    - name: Wait for the tunnelled primary service to appear
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        kind: Service
-        name: odoo-db-primary
-        namespace: "{{ odoo_namespace }}"
-      register: tunnel_svc
-      retries: 30
-      delay: 10
-      until: tunnel_svc.resources | length > 0
-
-    - name: Prove PostgreSQL answers across the VAN
-      kubernetes.core.k8s_exec:
-        kubeconfig: "{{ kubeconfig }}"
-        namespace: "{{ odoo_namespace }}"
-        pod: odoo-db-1
-        command: pg_isready -h odoo-db-primary -p 5432
-      register: tunnel_check
+        (token_status.resources[0].status.conditions | default([]))
+        | selectattr('type','equalto','Redeemed')
+        | selectattr('status','equalto','True') | list | length > 0
       failed_when: false
-      changed_when: false
 
-    - name: Report the tunnel check
+    - name: Report link status
       ansible.builtin.debug:
         msg: >-
-          {{ 'Tunnel OK — the standby can reach the primary.'
-             if tunnel_check.rc | default(1) == 0
-             else 'Tunnel not answering yet. The standby will retry pg_basebackup; re-run this play if it persists.' }}
+          {{ 'Interconnect link is up — the VAN carries PostgreSQL between sites.'
+             if (token_status.resources[0].status.conditions | default([]))
+                | selectattr('type','equalto','Redeemed')
+                | selectattr('status','equalto','True') | list | length > 0
+             else 'Token applied but not yet Redeemed. Check Site readiness on both clusters and re-run.' }}

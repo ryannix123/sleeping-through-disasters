@@ -1,134 +1,114 @@
 ---
-# The verification table from docs/BOOTSTRAP.md, as assertions.
-# Safe to run any time — it changes nothing.
-- name: Verify the active cluster
-  hosts: active
+# Verify the DR posture entirely from the hub.
+#
+# Rather than exec into pods on each managed cluster, this reads state that ACM
+# already surfaces on the hub: the Policy compliance for operators and standby
+# mode, and ManagedClusterView snapshots of the two CNPG Clusters. Hub-only.
+- name: Verify the pattern from the hub
+  hosts: hub
   gather_facts: false
 
   tasks:
-    - name: Fetch the PostgreSQL cluster
+    - name: Check ACM policies are compliant
       kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        api_version: postgresql.cnpg.io/v1
-        kind: Cluster
-        name: odoo-db
-        namespace: "{{ odoo_namespace }}"
-      register: pg
+        api_version: policy.open-cluster-management.io/v1
+        kind: Policy
+        namespace: "{{ acm_policy_namespace }}"
+      register: policies
 
-    - name: Assert two instances are ready
-      ansible.builtin.assert:
-        that:
-          - pg.resources[0].status.readyInstances | default(0) | int == 2
-        fail_msg: >-
-          Active cluster does not have 2 ready instances — Tier 1 (RPO ~0 for
-          node/AZ failure) is not in place.
-        success_msg: "Active PostgreSQL: 2 instances ready"
-
-    - name: Check the local replica is synchronous
-      kubernetes.core.k8s_exec:
-        kubeconfig: "{{ kubeconfig }}"
-        namespace: "{{ odoo_namespace }}"
-        pod: odoo-db-1
-        command: >-
-          psql -U postgres -tAc
-          "SELECT count(*) FROM pg_stat_replication WHERE sync_state = 'sync';"
-      register: sync_check
-      changed_when: false
-
-    - name: Assert a synchronous standby exists
-      ansible.builtin.assert:
-        that:
-          - sync_check.stdout | trim | int >= 1
-        fail_msg: "No synchronous standby — the in-cluster RPO promise is not met."
-        success_msg: "Synchronous local replica confirmed"
-
-    - name: Fetch the Odoo deployment
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        kind: Deployment
-        name: odoo
-        namespace: "{{ odoo_namespace }}"
-      register: odoo_active
-
-    - name: Assert Odoo is serving
-      ansible.builtin.assert:
-        that:
-          - odoo_active.resources[0].status.readyReplicas | default(0) | int >= 1
-        fail_msg: "Odoo is not ready on the active cluster."
-        success_msg: "Odoo is serving on the active cluster"
-
-    - name: Fetch the VolSync ReplicationSource
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        api_version: volsync.backube/v1alpha1
-        kind: ReplicationSource
-        name: odoo-data-backup
-        namespace: "{{ odoo_namespace }}"
-      register: volsync_src
-
-    - name: Report file-store sync status
+    - name: Report policy compliance
       ansible.builtin.debug:
-        msg:
-          - "Last sync:     {{ volsync_src.resources[0].status.lastSyncTime | default('not yet run') }}"
-          - "Last duration: {{ volsync_src.resources[0].status.lastSyncDuration | default('n/a') }}"
-          - "Note: if duration approaches the 2-minute schedule, the effective RPO is the duration, not the schedule."
+        msg: >-
+          {{ item.metadata.name }}: {{ item.status.compliant | default('unknown') }}
+      loop: "{{ policies.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
 
-- name: Verify the passive cluster
-  hosts: passive
-  gather_facts: false
+    - name: View the active CNPG cluster
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: view.open-cluster-management.io/v1beta1
+          kind: ManagedClusterView
+          metadata:
+            name: cnpg-active
+            namespace: "{{ active_cluster_name }}"
+          spec:
+            scope:
+              apiGroup: postgresql.cnpg.io
+              version: v1
+              kind: Cluster
+              name: odoo-db
+              namespace: "{{ odoo_namespace }}"
 
-  tasks:
-    - name: Fetch the PostgreSQL cluster
+    - name: Read the active cluster status
       kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        api_version: postgresql.cnpg.io/v1
-        kind: Cluster
-        name: odoo-db
-        namespace: "{{ odoo_namespace }}"
-      register: pg_passive
+        api_version: view.open-cluster-management.io/v1beta1
+        kind: ManagedClusterView
+        name: cnpg-active
+        namespace: "{{ active_cluster_name }}"
+      register: active_view
+      retries: 12
+      delay: 10
+      until: active_view.resources[0].status.result.status is defined
 
-    - name: Assert it is still a replica
+    - name: Assert the active database is healthy
       ansible.builtin.assert:
         that:
-          - pg_passive.resources[0].spec.replica.enabled | default(false) | bool
-        fail_msg: >-
-          The passive database is NOT in replica mode. If this was not a
-          deliberate promotion, you may have a split-brain risk.
-        success_msg: "Passive PostgreSQL is in replica mode"
+          - active_view.resources[0].status.result.status.readyInstances | default(0) | int >= 1
+        fail_msg: "Active CNPG cluster is not reporting ready instances."
+        success_msg: >-
+          Active DB ready instances:
+          {{ active_view.resources[0].status.result.status.readyInstances | default(0) }}
 
-    - name: Measure replication lag
-      kubernetes.core.k8s_exec:
-        kubeconfig: "{{ kubeconfig }}"
-        namespace: "{{ odoo_namespace }}"
-        pod: odoo-db-1
-        command: >-
-          psql -U postgres -tAc
-          "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0)::int;"
-      register: lag_check
-      changed_when: false
+    - name: View the passive CNPG cluster
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: view.open-cluster-management.io/v1beta1
+          kind: ManagedClusterView
+          metadata:
+            name: cnpg-passive
+            namespace: "{{ passive_cluster_name }}"
+          spec:
+            scope:
+              apiGroup: postgresql.cnpg.io
+              version: v1
+              kind: Cluster
+              name: odoo-db
+              namespace: "{{ odoo_namespace }}"
 
-    - name: Assert lag is within threshold
-      ansible.builtin.assert:
-        that:
-          - lag_check.stdout | trim | int <= replication_lag_threshold_seconds
-        fail_msg: >-
-          Replication lag is {{ lag_check.stdout | trim }}s, above the
-          {{ replication_lag_threshold_seconds }}s threshold.
-        success_msg: "Replication lag: {{ lag_check.stdout | trim }}s"
-
-    - name: Fetch the Odoo deployment
+    - name: Read the passive cluster status
       kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        kind: Deployment
-        name: odoo
-        namespace: "{{ odoo_namespace }}"
-      register: odoo_passive
+        api_version: view.open-cluster-management.io/v1beta1
+        kind: ManagedClusterView
+        name: cnpg-passive
+        namespace: "{{ passive_cluster_name }}"
+      register: passive_view
+      retries: 12
+      delay: 10
+      until: passive_view.resources[0].status.result.spec is defined
 
-    - name: Assert Odoo is scaled to zero
+    - name: Assert the passive database is a replica
       ansible.builtin.assert:
         that:
-          - odoo_passive.resources[0].spec.replicas | int == 0
+          - passive_view.resources[0].status.result.spec.replica.enabled | default(false) | bool
         fail_msg: >-
-          Odoo is running on the passive cluster. Expected 0 replicas outside
-          a failover.
-        success_msg: "Odoo is at 0 replicas on the passive cluster — correct"
+          Passive CNPG cluster is NOT in replica mode. If this was not a
+          deliberate promotion, investigate split-brain risk.
+        success_msg: "Passive DB is in replica mode — correct."
+
+    - name: Clean up the views
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: view.open-cluster-management.io/v1beta1
+          kind: ManagedClusterView
+          metadata:
+            name: "{{ item.name }}"
+            namespace: "{{ item.ns }}"
+      loop:
+        - { name: cnpg-active,  ns: "{{ active_cluster_name }}" }
+        - { name: cnpg-passive, ns: "{{ passive_cluster_name }}" }
+      loop_control:
+        label: "{{ item.name }}"

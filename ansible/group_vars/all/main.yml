@@ -32,3 +32,6 @@ cloudflare_lb_ttl: 30                # keep low; DNS TTL dominates real RTO
 operator_wait_retries: 60
 operator_wait_delay: 15
 replication_lag_threshold_seconds: 60
+
+# ACM policy namespace (where Policies + PlacementBindings live on the hub)
+acm_policy_namespace: odoo-dr-acm

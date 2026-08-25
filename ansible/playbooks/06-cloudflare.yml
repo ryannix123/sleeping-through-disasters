@@ -8,7 +8,7 @@
 #
 # Idempotent by lookup-then-create: each object is searched for by name first.
 - name: Configure Cloudflare load balancing
-  hosts: localhost
+  hosts: hub
   gather_facts: false
 
   vars:
@@ -22,25 +22,70 @@
     lb_name: "{{ cloudflare_hostname }}"
 
   tasks:
-    - name: Collect the OpenShift route for each cluster
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ hostvars[item].kubeconfig }}"
-        api_version: route.openshift.io/v1
-        kind: Route
-        name: odoo
-        namespace: "{{ odoo_namespace }}"
-      register: routes
-      loop: "{{ groups['managed'] }}"
+    # Read each cluster's Odoo Route through ACM (ManagedClusterView), so we
+    # never need a managed-cluster kubeconfig — the hub brokers the lookup.
+    - name: Create a view of each cluster's Odoo Route
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: view.open-cluster-management.io/v1beta1
+          kind: ManagedClusterView
+          metadata:
+            name: "odoo-route-{{ item.role }}"
+            namespace: "{{ item.cluster }}"
+          spec:
+            scope:
+              apiGroup: route.openshift.io
+              version: v1
+              kind: Route
+              name: odoo
+              namespace: "{{ odoo_namespace }}"
+      loop:
+        - { role: active,  cluster: "{{ active_cluster_name }}" }
+        - { role: passive, cluster: "{{ passive_cluster_name }}" }
+      loop_control:
+        label: "{{ item.role }}"
 
-    - name: Map cluster role to route hostname
+    - name: Read the route hostnames back from the views
+      kubernetes.core.k8s_info:
+        api_version: view.open-cluster-management.io/v1beta1
+        kind: ManagedClusterView
+        name: "odoo-route-{{ item.role }}"
+        namespace: "{{ item.cluster }}"
+      register: route_views
+      retries: 12
+      delay: 10
+      until: route_views.resources[0].status.result.spec.host is defined
+      loop:
+        - { role: active,  cluster: "{{ active_cluster_name }}" }
+        - { role: passive, cluster: "{{ passive_cluster_name }}" }
+      loop_control:
+        label: "{{ item.role }}"
+
+    - name: Map role to hostname
       ansible.builtin.set_fact:
         route_hosts: >-
           {{ route_hosts | default({}) | combine({
-               hostvars[item.item].cluster_role: item.resources[0].spec.host
+               item.item.role: item.resources[0].status.result.spec.host
              }) }}
-      loop: "{{ routes.results }}"
+      loop: "{{ route_views.results }}"
       loop_control:
-        label: "{{ item.item }}"
+        label: "{{ item.item.role }}"
+
+    - name: Clean up the route views
+      kubernetes.core.k8s:
+        state: absent
+        definition:
+          apiVersion: view.open-cluster-management.io/v1beta1
+          kind: ManagedClusterView
+          metadata:
+            name: "odoo-route-{{ item.role }}"
+            namespace: "{{ item.cluster }}"
+      loop:
+        - { role: active,  cluster: "{{ active_cluster_name }}" }
+        - { role: passive, cluster: "{{ passive_cluster_name }}" }
+      loop_control:
+        label: "{{ item.role }}"
 
     # ── Monitor ─────────────────────────────────────────────────────────────
     - name: List existing monitors

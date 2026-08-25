@@ -36,37 +36,22 @@
       loop_control:
         label: "{{ item.metadata.name }}"
 
-- name: Wait for the operators to install on both managed clusters
-  hosts: managed
-  gather_facts: false
 
-  vars:
-    required_operators:
-      - cloudnative-pg
-      - volsync
-      - skupper
-      - oadp
+    - name: Apply the ACM policies (operator + replication compliance)
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ item }}"
+      loop: >-
+        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/policies/*.yaml', wantlist=True)
+           | map('file') | map('from_yaml_all') | flatten | select('defined')
+           | rejectattr('kind','equalto','Kustomization') | list }}
+      loop_control:
+        label: "{{ item.kind }}/{{ item.metadata.name }}"
 
-  tasks:
-    - name: Wait for each operator to reach Succeeded
-      kubernetes.core.k8s_info:
-        kubeconfig: "{{ kubeconfig }}"
-        api_version: operators.coreos.com/v1alpha1
-        kind: ClusterServiceVersion
-      register: csvs
-      retries: "{{ operator_wait_retries }}"
-      delay: "{{ operator_wait_delay }}"
-      until: >-
-        required_operators | reject('in',
-          csvs.resources | default([])
-            | selectattr('status.phase', 'defined')
-            | selectattr('status.phase', 'equalto', 'Succeeded')
-            | map(attribute='metadata.name') | join(' ')
-        ) | list | length == 0
-
-    - name: Report which operators are installed
+    - name: Note
       ansible.builtin.debug:
         msg: >-
-          {{ csvs.resources | selectattr('status.phase', 'defined')
-             | selectattr('status.phase', 'equalto', 'Succeeded')
-             | map(attribute='metadata.name') | list }}
+          ApplicationSets and policies applied to the hub. Argo CD is now
+          installing operators and deploying to both managed clusters. Watch
+          progress in the ACM console (Governance) and Argo CD UI, or run
+          playbooks/99-verify.yml once syncs settle.
