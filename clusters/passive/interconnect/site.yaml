@@ -39,3 +39,25 @@ metadata:
     app.kubernetes.io/part-of: odoo-dr
 spec:
   secret: odoo-active-token
+---
+# Connector — publishes the LOCAL VolSync rsync-tls destination Service onto the
+# VAN, so the active site's ReplicationSource can reach it. This is the reverse
+# direction from the database: for filestore replication the passive site owns
+# the exposed endpoint (the destination), so the Connector lives here.
+#
+# VolSync's rsync-tls destination creates a Service named after the
+# ReplicationDestination ("odoo-data"). We publish it under a distinct routing
+# key so it does not collide with anything on the active side.
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: odoo-volsync-dest
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  routingKey: odoo-volsync-dest
+  port: 8000
+  # VolSync names the destination Service volsync-rsync-tls-dst-<dest name>.
+  # Our ReplicationDestination is "odoo-data".
+  host: volsync-rsync-tls-dst-odoo-data

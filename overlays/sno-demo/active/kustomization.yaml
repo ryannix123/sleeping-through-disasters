@@ -53,16 +53,10 @@ patches:
   - target:
       group: volsync.backube
       kind: ReplicationSource
-      name: odoo-data-backup
+      name: odoo-data
     patch: |-
       - op: add
-        path: /spec/restic/storageClassName
-        value: lvms-vg1
-      - op: add
-        path: /spec/restic/volumeSnapshotClassName
-        value: lvms-vg1
-      - op: add
-        path: /spec/restic/cacheStorageClassName
+        path: /spec/rsyncTLS/volumeSnapshotClassName
         value: lvms-vg1
 
   # ── Odoo: trim requests so it schedules comfortably on one node ──────────

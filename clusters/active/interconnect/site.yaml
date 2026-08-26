@@ -39,3 +39,19 @@ metadata:
 spec:
   redemptionsAllowed: 1
   expirationWindow: 168h
+---
+# Listener — creates a LOCAL Service "odoo-volsync-dest" that tunnels across the
+# VAN to the passive cluster's VolSync rsync-tls destination. The active
+# ReplicationSource targets this address. Mirrors how the DB primary is reached
+# from the passive side, but in the opposite direction.
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: odoo-volsync-dest
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  routingKey: odoo-volsync-dest
+  host: odoo-volsync-dest
+  port: 8000

@@ -77,3 +77,41 @@
                 | selectattr('type','equalto','Redeemed')
                 | selectattr('status','equalto','True') | list | length > 0
              else 'Token applied but not yet Redeemed. Check Site readiness on both clusters and re-run.' }}
+
+- name: Copy the VolSync rsync-tls key from the destination (passive) to the source (active)
+  hosts: passive_site
+  gather_facts: false
+  tasks:
+    - name: Wait for VolSync to generate the rsync-tls key secret
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Secret
+        name: volsync-rsync-tls-dst-odoo-data
+        namespace: "{{ skupper_namespace }}"
+      register: rsync_key
+      retries: 30
+      delay: 10
+      until: rsync_key.resources | length > 0
+
+    - name: Stash the key for the active site
+      ansible.builtin.set_fact:
+        rsync_key_data: "{{ rsync_key.resources[0].data }}"
+
+- name: Apply the rsync-tls key on the active site
+  hosts: active_site
+  gather_facts: false
+  tasks:
+    - name: Create the shared rsync-tls key secret on the source
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: volsync-rsync-tls-dst-odoo-data
+            namespace: "{{ skupper_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          type: Opaque
+          data: "{{ hostvars['passive_site'].rsync_key_data }}"

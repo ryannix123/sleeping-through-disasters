@@ -1,23 +1,32 @@
 ---
-# Restores the Odoo filestore from object storage during failover.
-# Triggered by annotating this resource; see docs/FAILOVER.md.
+# Filestore replication DESTINATION (passive site), using rsync-tls.
+#
+# PVC-to-PVC — no object storage. The database and the filestore both cross the
+# same Service Interconnect VAN. This is the more portable choice: many
+# customers do not run object storage, and it removes an external dependency.
+#
+# How rsync-tls works: the destination runs continuously and publishes a
+# service plus a pre-shared key. The source connects to that service over the
+# VAN and pushes the data. The destination writes into a PVC on this cluster,
+# which VolSync keeps ready for restore/promotion on failover.
 apiVersion: volsync.backube/v1alpha1
 kind: ReplicationDestination
 metadata:
-  name: odoo-data-restore
+  name: odoo-data
   namespace: odoo
   labels:
     app.kubernetes.io/part-of: odoo-dr
     app.kubernetes.io/component: volsync
 spec:
-  trigger:
-    manual: ""
-  restic:
-    repository: volsync-restic-config
+  rsyncTLS:
+    # serviceType ClusterIP: the destination is reached across the VAN via a
+    # Skupper Connector/Listener, not a cloud LoadBalancer. See interconnect/.
+    serviceType: ClusterIP
     copyMethod: Snapshot
     capacity: 20Gi
     accessModes:
       - ReadWriteOnce
-    cacheCapacity: 2Gi
-    cleanupCachePVC: false
+    # storageClassName / volumeSnapshotClassName inherited from the cluster
+    # default; the SNO overlay pins them to lvms-vg1.
     cleanupTempPVC: false
+    cleanupCachePVC: false

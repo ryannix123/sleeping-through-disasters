@@ -49,3 +49,16 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/resources/limits/memory
         value: 3Gi
+
+  # Pin the rsync-tls destination to LVM Storage snapshot class on SNO.
+  - target:
+      group: volsync.backube
+      kind: ReplicationDestination
+      name: odoo-data
+    patch: |-
+      - op: add
+        path: /spec/rsyncTLS/storageClassName
+        value: lvms-vg1
+      - op: add
+        path: /spec/rsyncTLS/volumeSnapshotClassName
+        value: lvms-vg1

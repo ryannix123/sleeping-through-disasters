@@ -71,7 +71,7 @@ ansible-vault edit group_vars/all/vault.yml
 
 `playbooks/04-secrets.yml` refuses to run while the placeholders are still there.
 
-Re-running `00` never overwrites an existing vault, so passwords cannot rotate by accident. To rotate deliberately, delete `vault.yml` first — and understand that changing `vault_volsync_restic_password` **orphans every existing backup**, because Restic cannot read a repository with a different password.
+Re-running `00` never overwrites an existing vault, so passwords cannot rotate by accident. To rotate deliberately, delete `vault.yml` first.
 
 Back up `.vault-pass` somewhere real. It is the only key to the vault.
 
