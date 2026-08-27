@@ -9,8 +9,27 @@ The steps are grouped into phases because several of them **fail confusingly if 
 - **Three OpenShift clusters**, 4.14+: a hub, and two managed clusters in different hyperscalers
 - `oc` logged in, cluster-admin on all three
 - A **fork of this repo** — you will edit the `repoURL` in the ApplicationSets
-- **S3-compatible object storage** for VolSync (AWS S3, Azure Blob via an S3 gateway, MinIO, ODF)
+- A **default `VolumeSnapshotClass` on each managed cluster** (see below) — VolSync uses `copyMethod: Snapshot` and needs one
 - A **Cloudflare account on a plan that includes Load Balancing** (health checks and failover)
+
+> **Default VolumeSnapshotClass.** VolSync replicates the filestore with
+> `copyMethod: Snapshot`, which requires each cluster to have a *default*
+> VolumeSnapshotClass. The manifests deliberately do **not** name a class, so
+> the same manifest works on any substrate (LVM on-prem, Ceph/ODF on AWS, EBS,
+> etc.) — each cluster uses its own default. Many storage operators create a
+> snapshot class but do not mark it default. Check and set one per cluster:
+>
+> ```bash
+> oc get volumesnapshotclass          # is one marked (default)?
+> # if not, pick the class for your storage and annotate it:
+> oc patch volumesnapshotclass <name> --type merge \
+>   -p '{"metadata":{"annotations":{"snapshot.storage.kubernetes.io/is-default-class":"true"}}}'
+> ```
+>
+> Example class names: `lvms-vg1` (LVM Storage), an
+> `*-rbdplugin-snapclass` (OpenShift Data Foundation / Ceph), `csi-aws-vsc`
+> (EBS CSI). Without a default, the first sync stalls with
+> `cannot find default snapshot class`.
 
 > **Prefer to automate this?** `ansible/` covers every phase below except the
 > manifests themselves, which Argo CD owns. Run `ansible-playbook site.yml`,
@@ -182,16 +201,12 @@ oc create secret generic odoo-replicator \
   --from-literal=password='<replication password>' \
   -n odoo
 
-# 3. Object storage for VolSync.
-#    Same bucket AND same RESTIC_PASSWORD on both, or the passive cluster
-#    cannot read the backups it is supposed to restore from.
-oc create secret generic volsync-restic-config \
-  --from-literal=AWS_ACCESS_KEY_ID='<key>' \
-  --from-literal=AWS_SECRET_ACCESS_KEY='<secret>' \
-  --from-literal=AWS_DEFAULT_REGION='us-east-1' \
-  --from-literal=RESTIC_REPOSITORY='s3:s3.amazonaws.com/<bucket>/odoo-filestore' \
-  --from-literal=RESTIC_PASSWORD='<strong passphrase - save this>' \
-  -n odoo
+# 3. VolSync rsync-tls key — NOT created by hand.
+#    Filestore replication uses rsync-tls PVC-to-PVC over the VAN (no object
+#    storage). The destination generates a pre-shared key automatically; it is
+#    copied from the passive cluster to the active cluster once, during the
+#    interconnect handshake (playbook 05, or the manual copy in this doc).
+#    There is nothing to create here.
 ```
 
 > Odoo CrashLoops until `odoo-admin` exists, and the passive database cannot bootstrap until `odoo-replicator` exists on both sides. Both are harmless if you are expecting them.

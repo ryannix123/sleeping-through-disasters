@@ -73,7 +73,7 @@ glossing over.
 | Cross-cluster replication without a VPN | **Yes** — Interconnect over outbound HTTPS |
 | GitOps-driven promotion | **Yes** — the hub survives to do it |
 | Automatic traffic failover | **Yes** — Cloudflare health checks |
-| File-store replication and restore | **Yes** — LVM Storage supports snapshots |
+| File-store replication and restore | **Yes** — LVM (active) → Ceph (passive), one manifest |
 | ACM Placement-driven targeting | **Yes** |
 | **Tier 1: RPO ~0 for node/AZ failure** | **No** — needs more than one node |
 
@@ -140,21 +140,44 @@ Rename them if the naming bothers you; nothing depends on it.
 > PostgreSQL waits indefinitely for a standby that will never exist. Every
 > write blocks and Odoo appears frozen. This is not a tuning preference.
 
-## LVM Storage notes
+## Storage notes — two substrates, one manifest
 
-LVM Storage provisions thin volumes specifically so that snapshots and clones
-work, and creates a StorageClass and a VolumeSnapshotClass both named
-`lvms-vg1`. The overlay names them explicitly rather than relying on defaults.
+This is a highlight of the pattern, not a footnote: the two clusters run
+**different storage**, and the *same* VolSync manifest replicates between them.
 
-Confirm before demo day:
+- **Active (homelab)** — LVM Storage, which provisions thin volumes so
+  snapshots work, and creates a StorageClass and VolumeSnapshotClass both named
+  `lvms-vg1`.
+- **Passive (AWS)** — OpenShift Data Foundation / Ceph, with an
+  `*-rbdplugin-snapclass` VolumeSnapshotClass and a `ceph-rbd` StorageClass.
+
+The base manifests name **no** snapshot class. VolSync's `copyMethod: Snapshot`
+uses each cluster's *default* VolumeSnapshotClass, so the identical manifest
+works on LVM, Ceph, EBS, or anything else. That is the storage-agnostic claim,
+demonstrated live: LVM on one side, Ceph on the other, replicating with one
+manifest.
+
+**Each cluster must have a default VolumeSnapshotClass.** Storage operators
+often create a snapshot class without marking it default. Set one per cluster:
+
+```bash
+oc get volumesnapshotclass                       # is one marked (default)?
+oc patch volumesnapshotclass <name> --type merge \
+  -p '{"metadata":{"annotations":{"snapshot.storage.kubernetes.io/is-default-class":"true"}}}'
+```
+
+Without a default, the first VolSync sync stalls with
+`cannot find default snapshot class`. First sync copies the whole filestore
+(minutes on a home uplink); every sync after is an incremental rsync (seconds).
+
+Confirm before demo day, on each cluster:
 
 ```bash
 oc get storageclass
 oc get volumesnapshotclass
-oc get lvmcluster -A
 ```
 
-Two things to watch:
+Two things to watch on LVM specifically:
 
 - **RAID device classes do not support snapshots.** If your `LVMCluster` uses
   `raidConfig`, thin provisioning is unavailable and so are snapshots. Change
