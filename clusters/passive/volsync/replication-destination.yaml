@@ -28,5 +28,3 @@ spec:
       - ReadWriteOnce
     # storageClassName / volumeSnapshotClassName inherited from the cluster
     # default; the SNO overlay pins them to lvms-vg1.
-    cleanupTempPVC: false
-    cleanupCachePVC: false
