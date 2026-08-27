@@ -1,0 +1,23 @@
+---
+# Applies every YAML file under {{ dir_path }} to the hub.
+# The k8s module accepts a multi-document YAML string in 'definition' and
+# applies every document, so we simply pass each file's raw contents.
+#
+# keep_kind is advisory only (kept for readability); Kustomization files are
+# skipped by name so they are never sent to the API.
+- name: "Find manifests in {{ dir_path }}"
+  ansible.builtin.find:
+    paths: "{{ dir_path }}"
+    patterns: "*.yaml"
+    excludes: "kustomization.yaml"
+  register: _dir_files
+  delegate_to: localhost
+
+- name: "Apply each manifest file in {{ dir_path }}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition: "{{ lookup('ansible.builtin.file', item) }}"
+  loop: "{{ _dir_files.files | map(attribute='path') | list }}"
+  loop_control:
+    label: "{{ item | basename }}"

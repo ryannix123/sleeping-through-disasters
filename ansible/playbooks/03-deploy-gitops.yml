@@ -1,9 +1,10 @@
 ---
-# Phase 1.4 and 2 — apply the hub bootstrap and the ApplicationSets, then
-# wait for the four operators to install on both managed clusters.
+# Phase 1.4 and 2 — apply the hub bootstrap and ApplicationSets to the hub,
+# then hand off to Argo CD, which installs operators and deploys to both
+# managed clusters.
 #
-# Early sync failures are expected here: the postgres, interconnect and
-# volsync Applications cannot succeed until their CRDs exist. Argo retries.
+# Early sync failures are expected: the postgres, interconnect and volsync
+# Applications cannot succeed until their CRDs exist. Argo retries.
 - name: Apply hub bootstrap and ApplicationSets
   hosts: hub
   gather_facts: false
@@ -13,45 +14,24 @@
 
   tasks:
     - name: Apply hub/ (ManagedClusterSet, Placements, GitOpsCluster)
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition: "{{ item }}"
-      loop: >-
-        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/hub/*.yaml', wantlist=True)
-           | map('file') | map('from_yaml_all') | flatten | select('defined')
-           | rejectattr('kind', 'equalto', 'Kustomization') | list }}
-      loop_control:
-        label: "{{ item.kind }}/{{ item.metadata.name }}"
+      ansible.builtin.include_tasks: apply_dir.yml
+      vars:
+        dir_path: "{{ repo_root }}/hub"
 
     - name: Apply the ApplicationSets
-      kubernetes.core.k8s:
-        kubeconfig: "{{ kubeconfig }}"
-        state: present
-        definition: "{{ item }}"
-      loop: >-
-        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/applicationsets/*.yaml', wantlist=True)
-           | map('file') | map('from_yaml_all') | flatten | select('defined')
-           | selectattr('kind', 'equalto', 'ApplicationSet') | list }}
-      loop_control:
-        label: "{{ item.metadata.name }}"
+      ansible.builtin.include_tasks: apply_dir.yml
+      vars:
+        dir_path: "{{ repo_root }}/applicationsets"
 
-
-    - name: Apply the ACM policies (operator + replication compliance)
-      kubernetes.core.k8s:
-        state: present
-        definition: "{{ item }}"
-      loop: >-
-        {{ lookup('ansible.builtin.fileglob', repo_root ~ '/policies/*.yaml', wantlist=True)
-           | map('file') | map('from_yaml_all') | flatten | select('defined')
-           | rejectattr('kind','equalto','Kustomization') | list }}
-      loop_control:
-        label: "{{ item.kind }}/{{ item.metadata.name }}"
+    - name: Apply the ACM policies
+      ansible.builtin.include_tasks: apply_dir.yml
+      vars:
+        dir_path: "{{ repo_root }}/policies"
 
     - name: Note
       ansible.builtin.debug:
         msg: >-
           ApplicationSets and policies applied to the hub. Argo CD is now
           installing operators and deploying to both managed clusters. Watch
-          progress in the ACM console (Governance) and Argo CD UI, or run
+          progress in the ACM console (Governance) and the Argo CD UI, or run
           playbooks/99-verify.yml once syncs settle.

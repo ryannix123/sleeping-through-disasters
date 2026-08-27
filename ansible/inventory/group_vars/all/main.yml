@@ -5,7 +5,6 @@
 # Namespaces
 odoo_namespace: odoo
 clusterset_name: odoo-dr
-
 # Git repo the ApplicationSets pull from. Change to your fork.
 gitops_repo_url: "https://github.com/ryannix123/sleeping-through-disasters.git"
 gitops_repo_revision: main
