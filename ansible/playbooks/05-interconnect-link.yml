@@ -86,7 +86,7 @@
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         kind: Secret
-        name: volsync-rsync-tls-dst-odoo-data
+        name: volsync-rsync-tls-odoo-data
         namespace: "{{ skupper_namespace }}"
       register: rsync_key
       retries: 30
@@ -109,7 +109,7 @@
           apiVersion: v1
           kind: Secret
           metadata:
-            name: volsync-rsync-tls-dst-odoo-data
+            name: volsync-rsync-tls-odoo-data
             namespace: "{{ skupper_namespace }}"
             labels:
               app.kubernetes.io/part-of: odoo-dr
