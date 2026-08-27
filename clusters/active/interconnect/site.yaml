@@ -8,7 +8,9 @@ metadata:
   labels:
     app.kubernetes.io/part-of: odoo-dr
 spec:
-  routerMode: interior
+  # This site ACCEPTS the incoming link (it issues the AccessGrant), so it
+  # must enable link access. routerMode was a v1 field and is gone in v2.
+  linkAccess: default
 ---
 # Connector — publishes the LOCAL PostgreSQL primary onto the VAN.
 #

@@ -7,8 +7,7 @@ metadata:
   namespace: odoo
   labels:
     app.kubernetes.io/part-of: odoo-dr
-spec:
-  routerMode: interior
+spec: {}  # initiates the outbound link (redeems the token); no linkAccess needed
 ---
 # Listener — creates a LOCAL Service named "odoo-db-primary" that tunnels
 # across the VAN to the active cluster's PostgreSQL primary.
