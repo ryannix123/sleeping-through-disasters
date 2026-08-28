@@ -117,14 +117,19 @@
         cf_monitors.json.result | selectattr('description', 'equalto', monitor_description)
         | list | length == 0
 
+    - name: Re-list monitors so the id is known
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/monitors"
+        headers: "{{ cf_headers }}"
+        method: GET
+      register: cf_monitors_final
+
     - name: Resolve the monitor id
       ansible.builtin.set_fact:
         monitor_id: >-
-          {{ cf_monitor_created.json.result.id
-             if cf_monitor_created.changed | default(false)
-             else (cf_monitors.json.result
-                   | selectattr('description', 'equalto', monitor_description)
-                   | first).id }}
+          {{ (cf_monitors_final.json.result
+              | selectattr('description', 'equalto', monitor_description)
+              | first).id }}
 
     # ── Pools ───────────────────────────────────────────────────────────────
     - name: List existing pools
