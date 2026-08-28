@@ -26,7 +26,7 @@ gitops_channel: latest
 # copied to the source by playbooks/05-interconnect-link.yml. Nothing to set.
 
 # ── Cloudflare ──────────────────────────────────────────────────────────────
-cloudflare_hostname: "odoo.example.com"
+cloudflare_hostname: "erp.openshifthelp.com"
 cloudflare_monitor_path: "/web/health"
 cloudflare_monitor_interval: 60      # seconds between health checks
 cloudflare_monitor_retries: 2        # retries before a pool is marked down
