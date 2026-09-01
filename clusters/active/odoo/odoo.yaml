@@ -55,6 +55,32 @@ spec:
   port:
     targetPort: http
 ---
+# PUBLIC hostname route. This is the stable name users hit (and the Cloudflare
+# LB fronts). It must exist on BOTH clusters so that after a failover the
+# promoted passive site answers on the same hostname. Declared here — NOT
+# created imperatively — so it survives a cluster rebuild / GitOps re-sync.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: odoo-erp
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+    app.kubernetes.io/component: app
+  annotations:
+    haproxy.router.openshift.io/timeout: "600s"
+spec:
+  host: erp.openshifthelp.com
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: odoo
+  port:
+    targetPort: http
+
+---
 # ACTIVE: serving traffic. replicas is 1 because the filestore PVC is ReadWriteOnce and Odoo pods cannot share it. Scaling out requires RWX or attachments-in-database.
 apiVersion: apps/v1
 kind: Deployment
