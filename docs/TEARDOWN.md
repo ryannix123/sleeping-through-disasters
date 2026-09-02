@@ -111,7 +111,7 @@ the stuck objects and leaves storage debris behind.
 
 ## 4. Remove the ACM policies and hub bootstrap
 
-The exact inverse of playbook `03`, using the repo's own files:
+The exact inverse of the hub bootstrap (playbooks `03`/`04`), using the repo's own files:
 
 ```bash
 cd sleeping-through-disasters
@@ -156,7 +156,8 @@ operator. Reinstalling adds ~5–10 minutes to the redeploy.
 - [ ] `odoo` namespace is `NotFound` on **both** clusters
 - [ ] `odoo-dr-acm` namespace and the hub bootstrap objects are gone
 - [ ] Default VolumeSnapshotClass annotation present on **both** clusters
-- [ ] Both kubeconfig tokens fresh (`oc whoami`)
+- [ ] Both kubeconfigs are single-context files with fresh tokens
+      (`oc --kubeconfig=<file> config get-contexts` shows one line; `whoami` works)
 
-Then redeploy from the top: `00-preflight` → `02` → `03` → `04` → `05` →
-`99` → `06`. See [BOOTSTRAP.md](BOOTSTRAP.md).
+Then redeploy from the top: `00-preflight` → `02` → `03-secrets` →
+`04-deploy-gitops` → `05` → `99` → `06`. See [BOOTSTRAP.md](BOOTSTRAP.md).

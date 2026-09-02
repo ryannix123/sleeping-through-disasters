@@ -1,7 +1,8 @@
 ---
-# Phase 1.4 and 2 — apply the hub bootstrap and ApplicationSets to the hub,
-# then hand off to Argo CD, which installs operators and deploys to both
-# managed clusters.
+# Phase 4 — the GitOps hand-off: apply the ApplicationSets (and ACM policies)
+# to the hub; Argo CD then installs operators and deploys to both managed
+# clusters. Runs AFTER 03-secrets so the odoo namespace and its credentials
+# already exist when CloudNativePG bootstraps.
 #
 # Early sync failures are expected: the postgres, interconnect and volsync
 # Applications cannot succeed until their CRDs exist. Argo retries.

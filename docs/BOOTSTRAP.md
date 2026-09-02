@@ -36,13 +36,39 @@ The steps are grouped into phases because several of them **fail confusingly if 
 > or use the per-phase playbooks alongside this document. See
 > [../ansible/README.md](../ansible/README.md).
 
+> **Kubeconfigs: one file per cluster, one context per file.** Create
+> `~/.kube/hub.config` and `~/.kube/active.config` with `oc login`, then strip
+> each to a single context — never use a copy of `~/.kube/config`:
+>
+> ```bash
+> KUBECONFIG=~/.kube/hub.config oc config view --minify --flatten > /tmp/h && mv /tmp/h ~/.kube/hub.config
+> KUBECONFIG=~/.kube/hub.config oc config get-contexts   # exactly one line, pointing at the hub
+> ```
+>
+> A many-context file with a movable current-context will silently send
+> commands (and playbooks) to the wrong cluster. Every cross-cluster "mystery"
+> in this pattern's history — a self-linking Skupper site, a grant server
+> answering 404, a scale-up landing on the wrong side — was this. **When two
+> clusters are involved and something looks impossible, verify the target
+> before diagnosing the symptom:** `oc --kubeconfig=<file> whoami --show-server`.
+> Prefix every command with `KUBECONFIG=...`; do not rely on your shell's
+> default context.
+
+> **Secrets before workloads.** CloudNativePG creates the `replicator` role
+> from the `odoo-replicator` Secret when the database bootstraps. If the Secret
+> is not there yet, the role is never created and the passive replica cannot
+> authenticate (endless `pgbasebackup` jobs, `password authentication failed`).
+> Phase 2 (secrets) therefore runs before Phase 3 (ApplicationSets). If you
+> ever hit it anyway, `oc get cluster odoo-db -o jsonpath='{.status.managedRolesStatus}'`
+> names the problem; restarting the CNPG operator pod re-reconciles the role.
+
 ## Order at a glance
 
 | Phase | What | Gate before moving on |
 |---|---|---|
 | 1 | Hub foundation: operators, import clusters, labels, `hub/` | Both clusters visible in Argo CD |
-| 2 | ApplicationSets — operators install first | Four operators `Succeeded` on both clusters |
-| 3 | Secrets that are not in Git | Three Secrets present on both clusters |
+| 2 | **Secrets first** — namespace + secrets on both clusters (playbook `03`) | Two Secrets present on both clusters |
+| 3 | ApplicationSets — the GitOps hand-off (playbook `04`) | Four operators `Succeeded`; workloads syncing |
 | 4 | Active site comes up | `odoo-db` healthy, sync replica confirmed, Odoo serving |
 | 5 | Link the two sites | `odoo-db-primary` answers from the passive cluster |
 | 6 | Passive database, then Cloudflare | Replication lag in seconds |
@@ -206,6 +232,7 @@ oc create secret generic odoo-replicator \
 #    storage). The destination generates a pre-shared key automatically; it is
 #    copied from the passive cluster to the active cluster once, during the
 #    interconnect handshake (playbook 05, or the manual copy in this doc).
+#    Note: the SECRET is volsync-rsync-tls-odoo-data (no -dst-); the Service keeps -dst-.
 #    There is nothing to create here.
 ```
 

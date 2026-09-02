@@ -4,4 +4,3 @@ collections:
     version: ">=3.0.0"
   - name: community.general
     version: ">=8.0.0"
-  - name: skupper.v2

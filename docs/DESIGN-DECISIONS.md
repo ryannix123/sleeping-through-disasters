@@ -233,6 +233,102 @@ already being purchased.
 
 ---
 
+## 3. Operational findings from the fresh from-the-top redeploy
+
+Things the second full deployment surfaced that the first passed by luck.
+Each is either fixed in the repo or recorded as a deliberate choice.
+
+### 3a. Secrets must exist before the database bootstraps (FIXED)
+
+CloudNativePG creates the `replicator` role from `managed.roles[].passwordSecret`
+at bootstrap. If `odoo-replicator` is not present yet, CNPG records
+`managedRolesStatus.cannotReconcile: "secrets odoo-replicator not found"`, skips
+the role, and does not reliably retry on its own. The passive replica then
+fails forever with `password authentication failed for user "replicator"`.
+
+Fix: playbook `03-secrets` (hub bootstrap + `odoo` namespace + secrets via ACM
+Policy) now runs **before** `04-deploy-gitops`. Argo sync-waves cannot express
+this because the secrets are not Argo's — they come from the Policy — so the
+ordering lives in the runbook, and the Policy creates the namespace itself so
+it can run first.
+
+### 3b. Kubeconfigs must be single-context files (RULE)
+
+A kubeconfig that is a copy of `~/.kube/config` (dozens of contexts, movable
+current-context) sent commands to the wrong cluster three separate times: a
+failover `oc scale` that landed on the dead site, a preflight that inspected
+the homelab and declared GitOps missing, and an AccessToken applied to the
+*active* cluster, which redeemed its own grant and produced a self-linking
+router loop (`Existing connection takes precedence, closing …`). Every one of
+those looked like a Skupper, DNS, or CNPG problem until the target was checked.
+
+Rule (BOOTSTRAP): `oc config view --minify --flatten` after every `oc login`;
+prefix every command with `KUBECONFIG=`; **verify the target before
+diagnosing the symptom.** Playbooks now pass the inventory kubeconfig to every
+task and never depend on ambient context.
+
+### 3c. The Skupper handshake is done with plain kubernetes.core (FIXED)
+
+The `skupper.v2` collection hung indefinitely on a `Pending` AccessGrant and is
+suspected of changing a kubeconfig's current-context. `05` now performs the
+handshake exactly as a successful manual one does — AccessGrant on active,
+wait for Ready + URL, AccessToken (url/code/ca) on passive, wait until both
+Sites report **2 sites in network** — with bounded retries and errors that
+name the object to check. It is idempotent and safe to re-run after a reboot.
+
+### 3d. Grant server on a NAT'd site is fragile (OPEN — topology recommendation)
+
+On the homelab active site, `svc/skupper-grant-server` is type `LoadBalancer`
+and sits at `EXTERNAL-IP <pending>` forever (no cloud LB provider on SNO).
+OpenShift falls back to a Route, which works, but the grant server was
+observed wedged (grants stuck `Pending` with no URL) after reboots and
+controller restarts, and once returned `404 No such access granted` for a
+grant it had just issued. A controller restart clears it each time.
+
+Recommendation: **flip the link direction.** Let the cloud site (real
+LoadBalancer, real ingress) hold `linkAccess: default` and issue the grant;
+let the NAT'd homelab redeem and dial *out*. Skupper links are bidirectional
+once formed, so replication direction is unaffected — only which side hosts
+the grant endpoint changes. This is also the more honest posture for the
+"active behind NAT" story: the site with no inbound reachability should never
+be the one required to accept connections.
+
+### 3e. Argo enforces `replicas: 0` on the passive Odoo (OPEN — failover fix)
+
+During the failover test, `oc scale deployment odoo --replicas=1` on the
+passive was reverted within a second: Git says `0`, and Argo self-heals it.
+The scale-up is therefore not a manual `oc scale` — it must be done in a way
+Argo respects. Two options: an `ignoreDifferences` on `/spec/replicas` for the
+passive Odoo Application (the HPA-coexistence pattern; simplest for the demo),
+or having the failover automation commit `0 → 1` to Git (purest GitOps). This
+is a requirement for the EDA/AAP failover job: **promote, then scale, in a
+GitOps-respecting way.**
+
+### 3f. Why not Knative (scale-to-zero) for the passive app (DECIDED: no)
+
+Considered as a "creative" way to keep the passive Odoo at zero and wake it on
+traffic. Rejected: Knative scales *compute* in response to *traffic*, but the
+gate in this failover is the *database promotion*. Traffic arriving at passive
+would boot Odoo against a read-only replica — reads work, writes fail, health
+checks pass — a half-alive app worse than a clean 503. Odoo is also not a
+Knative-shaped workload (RWO filestore PVC, long sessions, 30–90 s cold start
+that no health probe survives). The current "passive Odoo at 0 replicas" is
+doing a quiet, important job: it *guarantees* the passive pool fails health
+checks until promotion has happened. Keep it; let EDA own the ordering.
+
+### 3g. Cloudflare already gates the cutover correctly (CONFIRMED)
+
+`default_pools: [active, passive]` with `steering_policy: off` sends traffic
+only to the first healthy pool; passive receives nothing while active is up.
+The monitor (`60s` interval, `2` retries) marks active unhealthy after ~2
+minutes of no response — the "cut over after 2 minutes" behaviour, already
+configured. Keep `adaptive_routing.failover_across_pools: false`: enabling it
+would retry individual failed requests against passive *before* promotion. The
+passive pool being **Critical at rest is the correct state** — its health
+check is the promotion gate.
+
+---
+
 ## Stack / SKU summary (the "better together" motion)
 
 | Product | Role in the pattern |

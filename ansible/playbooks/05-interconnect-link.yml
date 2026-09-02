@@ -1,90 +1,229 @@
 ---
-# Phase 5 — establish the Service Interconnect link using the official
-# skupper.v2 Ansible collection.
+# Phase 5 — establish the Service Interconnect (Skupper v2) link, then copy
+# the VolSync rsync-tls key. The ONE play that talks to both managed clusters
+# directly; everything else goes through the hub.
 #
-# This is the Skupper-dev-endorsed path. The Site, Connector and Listener are
-# already deployed by the GitOps ApplicationSets; all that remains is the token
-# handshake, which the collection reduces to two tasks:
-#
-#   1. active site issues an AccessToken   -> register it as an Ansible fact
-#   2. passive site applies that fact       -> link forms over mTLS
-#
-# The token round-trips through hostvars, so there is no manual export, rename,
-# or metadata stripping. Each task targets its own cluster via kubeconfig.
-#
-# This is the ONE play that talks to the managed clusters directly. It is a
-# one-time bootstrap handshake, not reconciliation, so using the purpose-built
-# module here is the right tool rather than a departure from the ACM model.
-# Requires:  ansible-galaxy collection install skupper.v2
+# Design notes (learned the hard way — see docs/DESIGN-DECISIONS.md):
+#   * No skupper.v2 collection. It shells out to the CLI, hung on a Pending
+#     grant with no timeout, and once flipped a kubeconfig's current-context.
+#     This play uses only kubernetes.core, with the kubeconfig pinned on every
+#     task, and does exactly what a successful manual handshake does:
+#       active:  AccessGrant  -> wait Ready -> read url / code / ca
+#       passive: AccessToken(url, code, ca) -> Link forms -> both Sites see 2
+#   * Idempotent. If the passive Site already sees 2 sites in the network, the
+#     handshake is skipped. Safe to re-run after a reboot to re-link.
+#   * It issues its OWN grant (odoo-link-grant) rather than consuming the
+#     Argo-managed one, so a re-run never fights GitOps and a spent grant is
+#     simply replaced.
+#   * Every wait has a bounded retry, and a failure names the object to check.
 
-- name: Issue an access token on the active site
-  hosts: active_site
-  gather_facts: false
-  tasks:
-    - name: Create a token from the active (primary) site
-      skupper.v2.token:
-        name: odoo-active-link
-        kubeconfig: "{{ kubeconfig }}"
-        namespace: "{{ skupper_namespace }}"
-        redemptions_allowed: 1
-      register: active_token
-
-    - name: Confirm the token was issued
-      ansible.builtin.assert:
-        that:
-          - active_token.token is defined
-        fail_msg: >-
-          Skupper did not return a token. Check that the active Site is Ready
-          (oc get site -n {{ skupper_namespace }}) and that skupper.v2 is
-          installed.
-        success_msg: "Access token issued by the active site."
-
-- name: Redeem the token on the passive site
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Check whether the VAN link already exists
   hosts: passive_site
   gather_facts: false
   tasks:
-    - name: Apply the token to the passive (consumer) site
-      skupper.v2.resource:
-        def: "{{ hostvars['active_site'].active_token.token }}"
+    - name: Read the passive Site
+      kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ skupper_namespace }}"
+      register: passive_site_obj
+
+    - name: Decide whether a handshake is needed
+      ansible.builtin.set_fact:
+        link_needed: >-
+          {{ not (passive_site_obj.resources | length > 0
+                  and (passive_site_obj.resources[0].status.sitesInNetwork | default(0) | int) >= 2) }}
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'VAN already linked (passive Site sees ' ~
+             (passive_site_obj.resources[0].status.sitesInNetwork | default(0)) ~
+             ' sites) — skipping the handshake.'
+             if not link_needed else
+             'No VAN link yet — issuing a grant on active and redeeming it on passive.' }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Issue an access grant on the active site
+  hosts: active_site
+  gather_facts: false
+  tasks:
+    - name: Skip if the link already exists
+      ansible.builtin.meta: end_play
+      when: not hostvars['passive_site'].link_needed | bool
+
+    - name: Wait for the active Site to be Ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ skupper_namespace }}"
+      register: active_site_obj
+      retries: 20
+      delay: 10
+      until: >-
+        active_site_obj.resources | length > 0 and
+        (active_site_obj.resources[0].status.status | default('')) == 'Ready'
+
+    # Replace any previous grant of ours so a re-run never hits a spent one.
+    - name: Remove a previous grant from an earlier run
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        api_version: skupper.io/v2alpha1
+        kind: AccessGrant
+        name: odoo-link-grant
         namespace: "{{ skupper_namespace }}"
 
-    - name: Give the link a moment to establish
-      ansible.builtin.pause:
-        seconds: 15
+    - name: Issue a single-use grant
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: skupper.io/v2alpha1
+          kind: AccessGrant
+          metadata:
+            name: odoo-link-grant
+            namespace: "{{ skupper_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          spec:
+            redemptionsAllowed: 1
+            expirationWindow: 1h
 
-    - name: Read back the AccessToken status
+    # The grant server (part of the Skupper controller) fills in url/code/ca.
+    # On a site without a cloud LoadBalancer this can take a minute; if it
+    # stays Pending, the controller needs a restart — the failure says so.
+    - name: Wait for the grant to be Ready with a URL
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: AccessGrant
+        name: odoo-link-grant
+        namespace: "{{ skupper_namespace }}"
+      register: grant
+      retries: 18
+      delay: 10
+      until: >-
+        grant.resources | length > 0 and
+        (grant.resources[0].status.status | default('')) == 'Ready' and
+        (grant.resources[0].status.url | default('')) | length > 0 and
+        (grant.resources[0].status.code | default('')) | length > 0 and
+        (grant.resources[0].status.ca | default('')) | length > 0
+      failed_when: false
+
+    - name: Fail with a useful message if the grant never became Ready
+      ansible.builtin.assert:
+        that:
+          - grant.resources | length > 0
+          - (grant.resources[0].status.url | default('')) | length > 0
+        fail_msg: >-
+          AccessGrant odoo-link-grant on the active site did not become Ready
+          with a URL within 3 minutes. The Skupper grant server on that cluster
+          is not issuing. Check: oc get accessgrant -n {{ skupper_namespace }};
+          oc get pods -n openshift-operators | grep skupper. Restarting the
+          skupper-controller pod usually clears it, then re-run this playbook.
+
+    - name: Stash the grant for the passive site
+      ansible.builtin.set_fact:
+        grant_url: "{{ grant.resources[0].status.url }}"
+        grant_code: "{{ grant.resources[0].status.code }}"
+        grant_ca: "{{ grant.resources[0].status.ca }}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Redeem the grant on the passive site
+  hosts: passive_site
+  gather_facts: false
+  tasks:
+    - name: Skip if the link already exists
+      ansible.builtin.meta: end_play
+      when: not link_needed | bool
+
+    - name: Remove a stale token/link from an earlier run
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        api_version: skupper.io/v2alpha1
+        kind: "{{ item }}"
+        name: token-odoo-active-link
+        namespace: "{{ skupper_namespace }}"
+      loop: [AccessToken, Link]
+
+    - name: Apply the AccessToken (this is the redeem)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: skupper.io/v2alpha1
+          kind: AccessToken
+          metadata:
+            name: token-odoo-active-link
+            namespace: "{{ skupper_namespace }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          spec:
+            url: "{{ hostvars['active_site'].grant_url }}"
+            code: "{{ hostvars['active_site'].grant_code }}"
+            ca: "{{ hostvars['active_site'].grant_ca }}"
+
+    - name: Wait for the token to be redeemed
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         api_version: skupper.io/v2alpha1
         kind: AccessToken
-        name: odoo-active-link
+        name: token-odoo-active-link
         namespace: "{{ skupper_namespace }}"
-      register: token_status
+      register: token
       retries: 12
       delay: 10
-      until: >-
-        (token_status.resources[0].status.conditions | default([]))
-        | selectattr('type','equalto','Redeemed')
-        | selectattr('status','equalto','True') | list | length > 0
+      until: token.resources | length > 0 and (token.resources[0].status.redeemed | default(false)) | bool
       failed_when: false
+
+    - name: Fail with the token's own error if redemption did not happen
+      ansible.builtin.assert:
+        that:
+          - token.resources | length > 0
+          - (token.resources[0].status.redeemed | default(false)) | bool
+        fail_msg: >-
+          The AccessToken was not redeemed. Skupper says:
+          "{{ token.resources[0].status.message | default('no message') }}".
+          A 404 "No such access granted" means the passive cluster reached the
+          WRONG grant server — verify each kubeconfig is a single-context file
+          pointing at the intended cluster (see docs/BOOTSTRAP.md).
+
+    # The redeemed token creates the Link; the router then dials the active
+    # site's inter-router endpoint. Both Sites report 2 sites when it's up.
+    - name: Wait for both sites to see each other
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ skupper_namespace }}"
+      register: site_after
+      retries: 18
+      delay: 10
+      until: >-
+        site_after.resources | length > 0 and
+        (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2
 
     - name: Report link status
       ansible.builtin.debug:
-        msg: >-
-          {{ 'Interconnect link is up — the VAN carries PostgreSQL between sites.'
-             if (token_status.resources[0].status.conditions | default([]))
-                | selectattr('type','equalto','Redeemed')
-                | selectattr('status','equalto','True') | list | length > 0
-             else 'Token applied but not yet Redeemed. Check Site readiness on both clusters and re-run.' }}
+        msg: "VAN is up — passive Site sees {{ site_after.resources[0].status.sitesInNetwork }} sites. The link carries PostgreSQL and the filestore between clusters."
 
-- name: Copy the VolSync rsync-tls key from the destination (passive) to the source (active)
+# ─────────────────────────────────────────────────────────────────────────────
+# VolSync rsync-tls: the destination (passive) generates the pre-shared key;
+# the source (active) must hold an identical copy. Note the naming quirk: the
+# SECRET is volsync-rsync-tls-odoo-data (no -dst-), unlike the Service.
+- name: Read the VolSync rsync-tls key from the destination (passive)
   hosts: passive_site
   gather_facts: false
   tasks:
     - name: Wait for VolSync to generate the rsync-tls key secret
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
         kind: Secret
         name: volsync-rsync-tls-odoo-data
         namespace: "{{ skupper_namespace }}"
@@ -97,11 +236,11 @@
       ansible.builtin.set_fact:
         rsync_key_data: "{{ rsync_key.resources[0].data }}"
 
-- name: Apply the rsync-tls key on the active site
+- name: Apply the rsync-tls key on the source (active)
   hosts: active_site
   gather_facts: false
   tasks:
-    - name: Create the shared rsync-tls key secret on the source
+    - name: Create/refresh the shared rsync-tls key secret on the source
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         state: present
@@ -115,3 +254,7 @@
               app.kubernetes.io/part-of: odoo-dr
           type: Opaque
           data: "{{ hostvars['passive_site'].rsync_key_data }}"
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: "rsync-tls key present on both clusters. VolSync's first sync is a full copy (minutes); every sync after is incremental (seconds)."
