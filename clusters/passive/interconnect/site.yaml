@@ -1,5 +1,9 @@
 ---
 # Service Interconnect Site on the PASSIVE cluster.
+# The link handshake (AccessGrant on active, AccessToken here) is performed by
+# ansible/playbooks/05-interconnect-link.yml, NOT declared in Git: the grant
+# code is generated at runtime and a token is single-use, so neither is a
+# stable desired state. GitOps owns the Site, Listener and Connector.
 apiVersion: skupper.io/v2alpha1
 kind: Site
 metadata:
@@ -25,19 +29,6 @@ spec:
   routingKey: odoo-db-primary
   host: odoo-db-primary
   port: 5432
----
-# AccessToken — redeems the grant issued on the active cluster and
-# establishes the link. The referenced Secret is transferred once during
-# bootstrap; see docs/BOOTSTRAP.md.
-apiVersion: skupper.io/v2alpha1
-kind: AccessToken
-metadata:
-  name: odoo-active-link
-  namespace: odoo
-  labels:
-    app.kubernetes.io/part-of: odoo-dr
-spec:
-  secret: odoo-active-token
 ---
 # Connector — publishes the LOCAL VolSync rsync-tls destination Service onto the
 # VAN, so the active site's ReplicationSource can reach it. This is the reverse
