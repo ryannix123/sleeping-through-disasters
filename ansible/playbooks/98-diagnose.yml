@@ -1,0 +1,323 @@
+---
+# 98-diagnose.yml — prove the pattern is actually replicating, end to end.
+#
+# Talks to BOTH managed clusters (van_sites) and correlates them:
+#   * Database: writes a probe row into a tiny dedicated table (dr_probe) on
+#     the ACTIVE primary, then reads it back on the PASSIVE replica a few
+#     seconds later. It replicates through WAL exactly like Odoo's own tables,
+#     without depending on Odoo's schema (res_partner has NOT NULL columns).
+#     Also reports replication lag, real row counts, and the newest partners
+#     on each side — so records you create in the Odoo UI show up too.
+#   * Filestore: counts files in Odoo's filestore on active and in the VolSync
+#     destination volume on passive, and reports the last sync time/duration.
+#   * VAN: both Sites' sites-in-network, connector/listener match, link status.
+#   * Storage: PVC state on both sides (the passive odoo-data PVC is Pending by
+#     design — WaitForFirstConsumer — until failover scales Odoo up).
+#
+# Read-only except the probe row. Skip the write with:  -e write_probe=false
+# Drop the probe table with:                            -e cleanup_probes=true
+#
+#   ansible-playbook playbooks/98-diagnose.yml
+
+# ═════════════════════════════════════════════════════════════════════════════
+- name: ACTIVE — database, filestore, VAN
+  hosts: active_site
+  gather_facts: false
+  vars:
+    write_probe: true
+    cleanup_probes: false
+    ns: "{{ skupper_namespace }}"
+  tasks:
+    # ── database ────────────────────────────────────────────────────────────
+    - name: Read the CNPG cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ ns }}"
+      register: cl
+
+    - name: Record the active primary pod
+      ansible.builtin.set_fact:
+        primary_pod: "{{ cl.resources[0].status.currentPrimary | default('odoo-db-1') }}"
+        active_instances: "{{ cl.resources[0].status.readyInstances | default(0) }}"
+        active_phase: "{{ cl.resources[0].status.phase | default('unknown') }}"
+
+    - name: Replicator role present (this is what the passive authenticates as)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ primary_pod }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT count(*) FROM pg_roles WHERE rolname='replicator' AND rolreplication"
+      register: role
+
+    - name: Streaming replication connections seen by the primary
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ primary_pod }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT usename||' '||application_name||' '||state||' '||coalesce(sync_state,'') FROM pg_stat_replication ORDER BY 1"
+      register: repl
+
+    - name: Drop the probe table
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ primary_pod }}"
+        container: postgres
+        command: psql -q -U postgres -d odoo -tAc "DROP TABLE IF EXISTS dr_probe"
+      when: cleanup_probes | bool
+
+    - name: Write a probe row on the active primary
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ primary_pod }}"
+        container: postgres
+        command: >-
+          psql -q -U postgres -d odoo -tAc
+          "CREATE TABLE IF NOT EXISTS dr_probe (id serial PRIMARY KEY, name text, created_at timestamptz DEFAULT now());
+           INSERT INTO dr_probe (name)
+           VALUES ('DR-PROBE '||to_char(now(),'YYYY-MM-DD HH24:MI:SS'))
+           RETURNING name"
+      register: probe
+      when: write_probe | bool
+
+    - name: Set the probe name (only the DR-PROBE line, whatever else psql printed)
+      ansible.builtin.set_fact:
+        probe_name: >-
+          {{ (probe.stdout | default('')).splitlines()
+             | map('trim') | select('match', '^DR-PROBE') | list | first | default('') }}
+
+    - name: Row counts and newest records on active
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ primary_pod }}"
+        container: postgres
+        command: >-
+          psql -q -U postgres -d odoo -tAc
+          "SELECT 'partners='||(SELECT count(*) FROM res_partner)
+              ||' attachments='||(SELECT count(*) FROM ir_attachment)
+              ||' newest='||(SELECT string_agg(name, ' | ') FROM (SELECT name FROM res_partner ORDER BY create_date DESC LIMIT 3) t)"
+      register: active_counts
+
+    # ── filestore ───────────────────────────────────────────────────────────
+    - name: Find the Odoo app pod
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: "{{ ns }}"
+      register: pods
+
+    - name: Pick the Odoo pod
+      ansible.builtin.set_fact:
+        odoo_pod: >-
+          {{ (pods.resources | map(attribute='metadata.name') | list
+              | select('match', '^odoo-(?!db)') | list | first) | default('') }}
+
+    - name: Count files in the Odoo filestore (source of truth)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ odoo_pod }}"
+        command: sh -c "find /var/lib/odoo -type f | wc -l; du -sh /var/lib/odoo 2>/dev/null | cut -f1"
+      register: src_files
+      when: odoo_pod | length > 0
+      failed_when: false
+
+    - name: Read the VolSync ReplicationSource
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: volsync.backube/v1alpha1
+        kind: ReplicationSource
+        name: odoo-data
+        namespace: "{{ ns }}"
+      register: rs
+
+    # ── VAN + storage ───────────────────────────────────────────────────────
+    - name: Site / connector / listener / PVCs
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ ns }}"
+      loop:
+        - { api: skupper.io/v2alpha1, kind: Site }
+        - { api: skupper.io/v2alpha1, kind: Connector }
+        - { api: skupper.io/v2alpha1, kind: Listener }
+        - { api: v1, kind: PersistentVolumeClaim }
+      loop_control: { label: "{{ item.kind }}" }
+      register: van
+
+    - name: Stash active facts
+      ansible.builtin.set_fact:
+        a_site_n: "{{ van.results[0].resources[0].status.sitesInNetwork | default(0) }}"
+        a_conn: "{{ van.results[1].resources | map(attribute='status.status') | list }}"
+        a_lstn: "{{ van.results[2].resources | map(attribute='status.status') | list }}"
+        a_pvcs: "{{ van.results[3].resources | map(attribute='metadata.name') | zip(van.results[3].resources | map(attribute='status.phase')) | map('join', '=') | list }}"
+        a_files: "{{ (src_files.stdout | default('n/a')) | trim | replace('\n',' files, ') }}"
+        a_rs_last: "{{ rs.resources[0].status.lastSyncTime | default('never') }}"
+        a_rs_dur: "{{ rs.resources[0].status.lastSyncDuration | default('n/a') }}"
+        a_rs_next: "{{ rs.resources[0].status.nextSyncTime | default('n/a') }}"
+
+# ═════════════════════════════════════════════════════════════════════════════
+- name: PASSIVE — replica, destination volume, VAN
+  hosts: passive_site
+  gather_facts: false
+  vars:
+    ns: "{{ skupper_namespace }}"
+    probe_name: "{{ hostvars['active_site'].probe_name | default('') }}"
+  tasks:
+    - name: Give replication a moment
+      ansible.builtin.pause:
+        seconds: 5
+      when: probe_name | length > 0
+
+    - name: Read the CNPG replica cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ ns }}"
+      register: pcl
+
+    - name: Record the passive pod
+      ansible.builtin.set_fact:
+        passive_pod: "{{ pcl.resources[0].status.currentPrimary | default('odoo-db-1') }}"
+        passive_phase: "{{ pcl.resources[0].status.phase | default('unknown') }}"
+        passive_is_replica: "{{ pcl.resources[0].spec.replica.enabled | default(false) }}"
+
+    - name: Is it in recovery, and how far behind?
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ passive_pod }}"
+        container: postgres
+        command: >-
+          psql -q -U postgres -tAc
+          "SELECT 'in_recovery='||pg_is_in_recovery()
+              ||' lag='||coalesce((now() - pg_last_xact_replay_timestamp())::text,'(no replayed tx yet)')
+              ||' last_replay='||coalesce(pg_last_xact_replay_timestamp()::text,'none')"
+      register: lag
+
+    - name: Did the probe row arrive?
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ passive_pod }}"
+        container: postgres
+        command: psql -q -U postgres -d odoo -tAc "SELECT count(*) FROM dr_probe WHERE name = '{{ probe_name }}'"
+      register: probe_check
+      when: probe_name | length > 0
+
+    - name: Row counts and newest records on passive
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ passive_pod }}"
+        container: postgres
+        command: >-
+          psql -q -U postgres -d odoo -tAc
+          "SELECT 'partners='||(SELECT count(*) FROM res_partner)
+              ||' attachments='||(SELECT count(*) FROM ir_attachment)
+              ||' newest='||(SELECT string_agg(name, ' | ') FROM (SELECT name FROM res_partner ORDER BY create_date DESC LIMIT 3) t)"
+      register: passive_counts
+
+    # ── destination volume ──────────────────────────────────────────────────
+    - name: Read the VolSync ReplicationDestination
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: volsync.backube/v1alpha1
+        kind: ReplicationDestination
+        name: odoo-data
+        namespace: "{{ ns }}"
+      register: rd
+
+    - name: Find the rsync-tls destination mover pod
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        namespace: "{{ ns }}"
+      register: ppods
+
+    - name: Pick the mover pod
+      ansible.builtin.set_fact:
+        dst_pod: >-
+          {{ (ppods.resources | map(attribute='metadata.name') | list
+              | select('match', '^volsync-rsync-tls-dst-') | list | first) | default('') }}
+
+    - name: Count files on the destination volume (VolSync mounts it at /data)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ dst_pod }}"
+        command: sh -c "find /data -type f | wc -l; du -sh /data 2>/dev/null | cut -f1"
+      register: dst_files
+      when: dst_pod | length > 0
+      failed_when: false
+
+    # ── VAN + storage ───────────────────────────────────────────────────────
+    - name: Site / connector / listener / link / PVCs
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: "{{ item.api }}"
+        kind: "{{ item.kind }}"
+        namespace: "{{ ns }}"
+      loop:
+        - { api: skupper.io/v2alpha1, kind: Site }
+        - { api: skupper.io/v2alpha1, kind: Connector }
+        - { api: skupper.io/v2alpha1, kind: Listener }
+        - { api: skupper.io/v2alpha1, kind: Link }
+        - { api: v1, kind: PersistentVolumeClaim }
+      loop_control: { label: "{{ item.kind }}" }
+      register: pvan
+
+    - name: Stash passive facts
+      ansible.builtin.set_fact:
+        p_site_n: "{{ pvan.results[0].resources[0].status.sitesInNetwork | default(0) }}"
+        p_conn: "{{ pvan.results[1].resources | map(attribute='status.status') | list }}"
+        p_lstn: "{{ pvan.results[2].resources | map(attribute='status.status') | list }}"
+        p_link: "{{ pvan.results[3].resources | map(attribute='status.status') | list }}"
+        p_pvcs: "{{ pvan.results[4].resources | map(attribute='metadata.name') | zip(pvan.results[4].resources | map(attribute='status.phase')) | map('join', '=') | list }}"
+        p_files: "{{ (dst_files.stdout | default('n/a')) | trim | replace('\n',' files, ') }}"
+        p_rd_last: "{{ rd.resources[0].status.lastSyncTime | default('never') }}"
+        p_rd_dur: "{{ rd.resources[0].status.lastSyncDuration | default('n/a') }}"
+        p_rd_image: "{{ rd.resources[0].status.latestImage.name | default('none') }}"
+
+    # ── the report ──────────────────────────────────────────────────────────
+    - name: DIAGNOSIS
+      ansible.builtin.debug:
+        msg:
+          - "════════════ DATABASE ════════════"
+          - "active   : {{ hostvars['active_site'].active_phase }} · ready instances={{ hostvars['active_site'].active_instances }} · primary={{ hostvars['active_site'].primary_pod }} · replicator role={{ 'present' if (hostvars['active_site'].role.stdout | trim) == '1' else 'MISSING' }}"
+          - "active   : streaming clients → {{ (hostvars['active_site'].repl.stdout | trim | replace('\n',' ; ')) or 'NONE' }}"
+          - "passive  : {{ passive_phase }} · replica.enabled={{ passive_is_replica }} · {{ lag.stdout | trim }}"
+          - "probe    : {{ ('wrote \"' ~ probe_name ~ '\" on active → ' ~ ('FOUND on passive ✔' if (probe_check.stdout | default('0') | trim) == '1' else 'NOT (yet) on passive ✘')) if probe_name | length > 0 else 'skipped (write_probe=false)' }}"
+          - "active   : {{ hostvars['active_site'].active_counts.stdout | trim }}"
+          - "passive  : {{ passive_counts.stdout | trim }}"
+          - "════════════ FILESTORE (VolSync rsync-tls over the VAN) ════════════"
+          - "source   : {{ hostvars['active_site'].a_files }} · last sync {{ hostvars['active_site'].a_rs_last }} · took {{ hostvars['active_site'].a_rs_dur }} · next {{ hostvars['active_site'].a_rs_next }}"
+          - "dest     : {{ p_files }} · last sync {{ p_rd_last }} · took {{ p_rd_dur }} · latest snapshot {{ p_rd_image }}"
+          - "════════════ VAN (Service Interconnect) ════════════"
+          - "sites    : active sees {{ hostvars['active_site'].a_site_n }} · passive sees {{ p_site_n }} {{ '✔' if (hostvars['active_site'].a_site_n | int) >= 2 and (p_site_n | int) >= 2 else '✘ NOT LINKED' }}"
+          - "active   : connectors={{ hostvars['active_site'].a_conn }} listeners={{ hostvars['active_site'].a_lstn }}"
+          - "passive  : connectors={{ p_conn }} listeners={{ p_lstn }} link={{ p_link }}"
+          - "════════════ STORAGE ════════════"
+          - "active   : {{ hostvars['active_site'].a_pvcs }}"
+          - "passive  : {{ p_pvcs }}   (odoo-data Pending is expected: WaitForFirstConsumer, binds on failover)"
+
+    - name: Verdict
+      ansible.builtin.assert:
+        that:
+          - (hostvars['active_site'].a_site_n | int) >= 2
+          - (p_site_n | int) >= 2
+          - passive_is_replica | bool
+          - "'in_recovery=t' in (lag.stdout | default(''))"
+          - (probe_name | length == 0) or ((probe_check.stdout | default('0') | trim) == '1')
+        success_msg: "PASS — VAN linked, passive is a streaming replica, and the probe row crossed clouds."
+        fail_msg: "FAIL — see the DIAGNOSIS above for which leg is broken."

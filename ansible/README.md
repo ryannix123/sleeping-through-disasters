@@ -92,6 +92,7 @@ ansible-playbook playbooks/03-secrets.yml            # hub/ bootstrap + odoo nam
 ansible-playbook playbooks/04-deploy-gitops.yml      # applicationsets/ + policies/ — the GitOps hand-off
 ansible-playbook playbooks/05-interconnect-link.yml  # Skupper link handshake + VolSync key (see note below)
 ansible-playbook playbooks/06-cloudflare.yml         # monitor, pools, load balancer
+ansible-playbook playbooks/98-diagnose.yml           # cross-cluster proof: probe row, filestore counts, VAN (see docs/VALIDATION.md)
 ansible-playbook playbooks/99-verify.yml             # assertions via ACM, changes nothing
 ```
 
