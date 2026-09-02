@@ -26,6 +26,7 @@
     # never need a managed-cluster kubeconfig — the hub brokers the lookup.
     - name: Create a view of each cluster's Odoo Route
       kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
         state: present
         definition:
           apiVersion: view.open-cluster-management.io/v1beta1
@@ -48,6 +49,7 @@
 
     - name: Read the route hostnames back from the views
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: view.open-cluster-management.io/v1beta1
         kind: ManagedClusterView
         name: "odoo-route-{{ item.role }}"
@@ -74,6 +76,7 @@
 
     - name: Clean up the route views
       kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
         state: absent
         definition:
           apiVersion: view.open-cluster-management.io/v1beta1

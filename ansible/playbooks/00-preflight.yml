@@ -11,13 +11,14 @@
   tasks:
     - name: Look for the OpenShift GitOps subscription
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: operators.coreos.com/v1alpha1
         kind: Subscription
-        namespace: openshift-operators
       register: subs
 
     - name: Look for the openshift-gitops namespace (operator-created)
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: v1
         kind: Namespace
         name: openshift-gitops
@@ -38,6 +39,7 @@
 
     - name: Look for ACM (MultiClusterHub)
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: operator.open-cluster-management.io/v1
         kind: MultiClusterHub
       register: mch

@@ -9,6 +9,7 @@
   tasks:
     - name: Fetch both ManagedClusters
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: cluster.open-cluster-management.io/v1
         kind: ManagedCluster
         name: "{{ item }}"

@@ -11,6 +11,7 @@
   tasks:
     - name: Check ACM policies are compliant
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: policy.open-cluster-management.io/v1
         kind: Policy
         namespace: "{{ acm_policy_namespace }}"
@@ -26,6 +27,7 @@
 
     - name: View the active CNPG cluster
       kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
         state: present
         definition:
           apiVersion: view.open-cluster-management.io/v1beta1
@@ -43,6 +45,7 @@
 
     - name: Read the active cluster status
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: view.open-cluster-management.io/v1beta1
         kind: ManagedClusterView
         name: cnpg-active
@@ -63,6 +66,7 @@
 
     - name: View the passive CNPG cluster
       kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
         state: present
         definition:
           apiVersion: view.open-cluster-management.io/v1beta1
@@ -80,6 +84,7 @@
 
     - name: Read the passive cluster status
       kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
         api_version: view.open-cluster-management.io/v1beta1
         kind: ManagedClusterView
         name: cnpg-passive
@@ -100,6 +105,7 @@
 
     - name: Clean up the views
       kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
         state: absent
         definition:
           apiVersion: view.open-cluster-management.io/v1beta1
