@@ -211,7 +211,7 @@ GATED. Conditions for promotion are met but auto_promote=false.
 A human then promotes with one command:
 
 ```bash
-tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --serviceaccount dr-failover --showlog
+KUBECONFIG=$HUB tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --use-param-defaults --serviceaccount dr-failover --showlog
 ```
 
 For fully automatic failover (Phase 2b) set `auto_promote` to `"true"` in the
@@ -219,13 +219,17 @@ TriggerTemplate (webhook) or the poller's `AUTO_PROMOTE` env, and commit.
 
 ### Running it by hand, and watching
 
+`tkn` reads your shell's default kubeconfig, not the inventory — prefix it
+with `KUBECONFIG=$HUB` exactly like `oc`. `--use-param-defaults` skips the
+interactive prompt for every parameter.
+
 ```bash
 # dry verification only (no changes)
-tkn pipeline start dr-failover -n odoo -p source=manual --serviceaccount dr-failover --showlog
+KUBECONFIG=$HUB tkn pipeline start dr-failover -n odoo -p source=manual --use-param-defaults --serviceaccount dr-failover --showlog
 
 # history — every failover is a PipelineRun with logs
-tkn pipelinerun list -n odoo
-tkn pipelinerun logs -n odoo <name>
+KUBECONFIG=$HUB tkn pipelinerun list -n odoo
+KUBECONFIG=$HUB tkn pipelinerun logs -n odoo <name> -f
 ```
 
 ### What is NOT automated yet

@@ -74,7 +74,7 @@ spec:
 
         # 3. The witness: can this replica still hear the primary over the VAN?
         pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
-        silence=$(oc exec -n odoo "$pod" -c postgres -- psql -q -tAc \
+        silence=$(oc exec -n odoo "$pod" -c postgres -- psql -q -U postgres -tAc \
           "SELECT coalesce(min(extract(epoch from (now() - last_msg_receipt_time)))::int, 999999)
              FROM pg_stat_wal_receiver WHERE status='streaming'")
         echo "seconds since last WAL message from primary: $silence"
@@ -105,7 +105,7 @@ spec:
         for i in $(seq 1 60); do
           phase=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.phase}')
           pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
-          rec=$(oc exec -n odoo "$pod" -c postgres -- psql -q -tAc "SELECT pg_is_in_recovery()" 2>/dev/null || echo "?")
+          rec=$(oc exec -n odoo "$pod" -c postgres -- psql -q -U postgres -tAc "SELECT pg_is_in_recovery()" 2>/dev/null || echo "?")
           echo "  $phase · pg_is_in_recovery=$rec"
           if [ "$phase" = "Cluster in healthy state" ] && [ "$rec" = "f" ]; then echo "PROMOTED: $pod is primary and writable"; exit 0; fi
           sleep 5
@@ -212,5 +212,5 @@ spec:
                 echo
                 echo "GATED. Conditions for promotion are met but auto_promote=false."
                 echo "A human confirms with:"
-                echo "  tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --serviceaccount dr-failover"
+                echo "  KUBECONFIG=<hub> tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --use-param-defaults --serviceaccount dr-failover --showlog"
               fi
