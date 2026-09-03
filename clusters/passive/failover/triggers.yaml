@@ -168,9 +168,15 @@ spec:
                   set -euo pipefail
                   resp=$(curl -sS -H "Authorization: Bearer $CF_TOKEN" \
                     "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/$CF_POOL")
-                  if echo "$resp" | grep -q '"healthy":true';  then healthy=true
-                  elif echo "$resp" | grep -q '"healthy":false'; then healthy=false
-                  else echo "unexpected API response: $resp"; exit 1; fi
+                  # Pool-level "healthy" is the first occurrence (the origins' own
+                  # "healthy" fields come later). Cloudflare pretty-prints with a
+                  # space after the colon, so match either form.
+                  verdict=$(echo "$resp" | grep -oE '"healthy":[[:space:]]*(true|false)' | head -1 | grep -oE 'true|false' || true)
+                  case "$verdict" in
+                    true)  healthy=true ;;
+                    false) healthy=false ;;
+                    *)     echo "unexpected API response: $resp"; exit 1 ;;
+                  esac
                   count=$(oc get configmap dr-poller-state -n odoo -o jsonpath='{.data.unhealthy_count}' 2>/dev/null || echo 0)
                   if [ "$healthy" = "true" ]; then
                     [ "$count" != "0" ] && echo "active pool healthy again; resetting counter"
