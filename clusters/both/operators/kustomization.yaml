@@ -1,11 +1,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: odoo
 resources:
-  - rbac.yaml
-  - pipeline.yaml
-  - triggers.yaml
-
+  - cloudnative-pg.yaml
+  - volsync.yaml
+  - service-interconnect.yaml
+  - oadp.yaml
+  - openshift-pipelines.yaml
+  
 # Not in Git (delivered by ansible/playbooks/03-secrets.yml via ACM Policy):
 #   Secret cloudflare-webhook-secret  (key: secret)  — validates cf-webhook-auth
 #   Secret cloudflare-api-token       (key: token)   — used by the poller
