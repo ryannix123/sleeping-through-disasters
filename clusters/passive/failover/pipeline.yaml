@@ -1,0 +1,216 @@
+---
+# dr-failover — the Phase-2 automation. Runs on the PASSIVE cluster (the
+# survivor) using only in-cluster credentials; nothing outside OpenShift holds
+# a cluster token. Three tasks, causally ordered:
+#
+#   verify   — reject bad callers; refuse if the primary is provably alive
+#   promote  — CNPG replica cluster -> primary  (only if verify said "promote")
+#   scale    — Odoo 0 -> 1, wait for /web/health (Cloudflare then flips)
+#
+# The human gate is one parameter: auto_promote. With "false" (default), the
+# pipeline runs verify and STOPS, recording the decision — a human then starts
+# a run with auto_promote=true (Phase 2a). Flip the TriggerTemplate's default
+# to "true" for fully automatic failover (Phase 2b). Same pipeline either way.
+#
+# Split-brain protection is the "witness" step in verify: the passive replica
+# itself knows whether it can still hear the primary over the VAN
+# (pg_stat_wal_receiver). If Cloudflare says "unhealthy" but WAL is still
+# streaming, the active site is alive and merely unreachable from the edge —
+# the pipeline REFUSES to promote. Two independent signals must agree.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dr-verify
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Authenticate the caller and decide whether promotion is safe.
+  params:
+    - name: source
+      type: string            # webhook | poller | manual
+    - name: webhook_auth
+      type: string
+      default: ""             # value of the cf-webhook-auth header (webhook only)
+    - name: pool_name
+      type: string
+      default: ""
+    - name: new_health
+      type: string
+      default: ""
+    - name: wal_stale_seconds
+      type: string
+      default: "60"           # WAL silence longer than this = primary is gone
+  results:
+    - name: decision          # promote | refuse | already-primary
+    - name: reason
+  steps:
+    - name: verify
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      env:
+        - name: CF_WEBHOOK_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: cloudflare-webhook-secret
+              key: secret
+              optional: true
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        decide() { printf '%s' "$1" > "$(results.decision.path)"; printf '%s' "$2" > "$(results.reason.path)"; echo "DECISION: $1 — $2"; }
+
+        echo "source=$(params.source) pool=$(params.pool_name) health=$(params.new_health)"
+
+        # 1. Authenticate webhook callers. Reject before touching anything.
+        if [ "$(params.source)" = "webhook" ]; then
+          if [ -z "${CF_WEBHOOK_SECRET:-}" ]; then decide refuse "no cloudflare-webhook-secret configured; refusing webhook"; exit 1; fi
+          if [ "$(params.webhook_auth)" != "$CF_WEBHOOK_SECRET" ]; then decide refuse "cf-webhook-auth mismatch; rejected"; exit 1; fi
+          case "$(params.new_health)" in *[Uu]nhealthy*|*[Cc]ritical*) ;; *) decide refuse "webhook health '$(params.new_health)' is not an outage"; exit 0;; esac
+        fi
+
+        # 2. Are we already the primary? Then there's nothing to do.
+        replica=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.spec.replica.enabled}')
+        if [ "$replica" != "true" ]; then decide already-primary "spec.replica.enabled=$replica — passive is already promoted"; exit 0; fi
+
+        # 3. The witness: can this replica still hear the primary over the VAN?
+        pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
+        silence=$(oc exec -n odoo "$pod" -c postgres -- psql -q -tAc \
+          "SELECT coalesce(min(extract(epoch from (now() - last_msg_receipt_time)))::int, 999999)
+             FROM pg_stat_wal_receiver WHERE status='streaming'")
+        echo "seconds since last WAL message from primary: $silence"
+        if [ "$silence" -lt "$(params.wal_stale_seconds)" ]; then
+          decide refuse "primary is ALIVE: WAL received ${silence}s ago over the VAN. Cloudflare sees an edge/ingress outage, not a dead site. Promoting now would split-brain."
+          exit 1
+        fi
+
+        decide promote "no WAL from primary for ${silence}s and the edge reports it unhealthy — two independent signals agree the active site is gone"
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dr-promote-database
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Promote the CNPG replica cluster to a writable primary.
+  steps:
+    - name: promote
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        oc patch cluster.postgresql.cnpg.io odoo-db -n odoo --type merge -p '{"spec":{"replica":{"enabled":false}}}'
+        echo "waiting for the promoted cluster to become a healthy, writable primary…"
+        for i in $(seq 1 60); do
+          phase=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.phase}')
+          pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
+          rec=$(oc exec -n odoo "$pod" -c postgres -- psql -q -tAc "SELECT pg_is_in_recovery()" 2>/dev/null || echo "?")
+          echo "  $phase · pg_is_in_recovery=$rec"
+          if [ "$phase" = "Cluster in healthy state" ] && [ "$rec" = "f" ]; then echo "PROMOTED: $pod is primary and writable"; exit 0; fi
+          sleep 5
+        done
+        echo "timed out waiting for promotion"; exit 1
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dr-scale-application
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Scale Odoo up on the passive site and wait until it answers /web/health.
+  steps:
+    - name: scale
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        # Argo ignores /spec/replicas on this Deployment (see applicationsets/app-passive.yaml),
+        # so this scale sticks instead of being self-healed back to 0.
+        oc scale deployment odoo -n odoo --replicas=1
+        oc rollout status deployment/odoo -n odoo --timeout=300s
+        echo "waiting for Odoo to answer /web/health…"
+        for i in $(seq 1 60); do
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://odoo.odoo.svc:8069/web/health || true)
+          echo "  /web/health -> $code"
+          if [ "$code" = "200" ]; then echo "SERVING: Cloudflare's health check will flip the passive pool green within one monitor interval"; exit 0; fi
+          sleep 5
+        done
+        echo "Odoo never answered /web/health"; exit 1
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: dr-failover
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Verify the outage is real, promote the database, scale the application.
+  params:
+    - name: source
+      type: string
+      default: manual
+    - name: webhook_auth
+      type: string
+      default: ""
+    - name: pool_name
+      type: string
+      default: ""
+    - name: new_health
+      type: string
+      default: ""
+    - name: auto_promote
+      type: string
+      default: "false"        # the human gate. "true" = fully automatic (Phase 2b)
+  tasks:
+    - name: verify
+      taskRef:
+        name: dr-verify
+      params:
+        - { name: source,       value: $(params.source) }
+        - { name: webhook_auth, value: $(params.webhook_auth) }
+        - { name: pool_name,    value: $(params.pool_name) }
+        - { name: new_health,   value: $(params.new_health) }
+    - name: promote
+      runAfter: [verify]
+      when:
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        - { input: $(params.auto_promote),          operator: in, values: ["true"] }
+      taskRef:
+        name: dr-promote-database
+    - name: scale
+      runAfter: [promote]
+      when:
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        - { input: $(params.auto_promote),          operator: in, values: ["true"] }
+      taskRef:
+        name: dr-scale-application
+  finally:
+    - name: report
+      params:
+        - { name: decision, value: $(tasks.verify.results.decision) }
+        - { name: reason,   value: $(tasks.verify.results.reason) }
+        - { name: gate,     value: $(params.auto_promote) }
+      taskSpec:
+        params:
+          - { name: decision, type: string }
+          - { name: reason,   type: string }
+          - { name: gate,     type: string }
+        steps:
+          - name: summary
+            image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+            script: |
+              #!/bin/bash
+              echo "════════ dr-failover ════════"
+              echo "decision     : $(params.decision)"
+              echo "reason       : $(params.reason)"
+              echo "auto_promote : $(params.gate)"
+              if [ "$(params.decision)" = "promote" ] && [ "$(params.gate)" != "true" ]; then
+                echo
+                echo "GATED. Conditions for promotion are met but auto_promote=false."
+                echo "A human confirms with:"
+                echo "  tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --serviceaccount dr-failover"
+              fi

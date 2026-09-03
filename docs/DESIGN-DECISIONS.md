@@ -329,6 +329,74 @@ check is the promotion gate.
 
 ---
 
+## 4. Failover executor: OpenShift Pipelines, not AAP (DECIDED)
+
+**The concern.** Requiring Ansible Automation Platform for the failover step
+adds a substantial subscription a customer may not have. The pattern's own
+rule — *better together, not required* — has to apply to its own automation.
+
+**What the executor actually has to do** is small: receive a signal that the
+active site is down, check that the signal is trustworthy, patch one CNPG
+object, scale one Deployment, wait for a health check. That is a webhook and
+three `oc` commands. It does not need an automation platform.
+
+### The options, ranked
+
+| | Trigger | Executor | Extra cost | Notes |
+| --- | --- | --- | --- | --- |
+| **Best** | Cloudflare webhook → Tekton `EventListener` | **OpenShift Pipelines** | none | Declarative, in Git, every failover is a `PipelineRun` with logs. **Needs a Cloudflare Pro+ zone** for generic webhooks. |
+| **Better** | `CronJob` polling the pool-health API | OpenShift Pipelines (same Pipeline) | none | Works on **any** Cloudflare plan; no inbound route needed. ~1 min slower. |
+| Good | Knative Service (function) | OpenShift Serverless | none | Legitimate — a stateless, seconds-long HTTP function is exactly what Knative is for. Loses Pipelines' run history; logic lives in code. |
+| Optional | Cloudflare webhook → EDA rulebook | **AAP** | AAP subscription | Best if the customer already runs AAP and wants failover in their automation estate. Same signals, same safety checks. |
+| Avoid | Cloudflare Worker calling the cluster API | — | — | Puts a cluster credential and the failover logic *outside* OpenShift — the opposite of the thesis. |
+
+Both Pipelines triggers land on the **same** `dr-failover` Pipeline
+(`clusters/passive/failover/`). The trigger is a plan-tier choice; the
+safety logic is identical.
+
+### Safety: two independent signals must agree
+
+Cloudflare's health verdict is already a multi-PoP majority vote. The
+Pipeline adds a second, independent witness that no external system can
+provide: **the passive replica itself knows whether it can still hear the
+primary.** `pg_stat_wal_receiver` reports how many seconds ago the last WAL
+message arrived over the VAN.
+
+- Edge says *unhealthy* **and** WAL silent for > 60 s → the active site is
+  gone from two directions → **promote**.
+- Edge says *unhealthy* **but** WAL still streaming → the active site is
+  alive and merely unreachable from the internet (ingress/DNS/edge outage) →
+  **refuse**. Promoting here is the split-brain case.
+
+Webhook callers are authenticated against the `cf-webhook-auth` shared secret
+(held in a Secret, never in Git), and the webhook Route is IP-allowlisted to
+Cloudflare's published ranges. A forged POST is rejected before anything is
+touched.
+
+### The human gate is one parameter
+
+`auto_promote` (default `"false"`). With it off, the Pipeline verifies, records
+the decision, and stops — **Phase 2a**: detect and prepare automatically, a
+human confirms. Flip the default to `"true"` in the TriggerTemplate (or the
+poller's env) for **Phase 2b**: fully automatic. The same Pipeline, the same
+checks; only who pulls the trigger changes. That progression is what lets a
+risk function adopt this incrementally.
+
+### What this changes in the pattern
+
+- **Argo must not fight the scale-up.** `applicationsets/app-passive.yaml`
+  now carries `ignoreDifferences` on `/spec/replicas` for the Odoo Deployment
+  (+ `RespectIgnoreDifferences=true`). Git still owns everything else; the
+  replica count is runtime state, like an HPA's.
+- **SKU story becomes honest:** OpenShift · ACM (+VolSync) · Service
+  Interconnect are load-bearing; Pipelines is included; AAP slots in *if you
+  have it*. Three-plus-included, not four-or-nothing.
+- The **return of the original region** (re-establishing it as a replica of
+  the promoted site) is a separate reconcile pipeline — still open. It is the
+  harder half and deserves its own design; it is not what breaks first.
+
+---
+
 ## Stack / SKU summary (the "better together" motion)
 
 | Product | Role in the pattern |

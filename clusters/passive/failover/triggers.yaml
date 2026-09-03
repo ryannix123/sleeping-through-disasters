@@ -1,0 +1,200 @@
+---
+# ── TRIGGER A: Cloudflare webhook (needs a Pro+ zone for generic webhooks) ──
+#
+# Cloudflare Notifications → "Load Balancing Health Alert" → this EventListener.
+# Envelope (developers.cloudflare.com/notifications/reference/webhook-payload-schema):
+#   { alert_type: "load_balancing_health_alert", alert_event: "ALERT_STATE_EVENT_START",
+#     data: { pool_name, pool_id, new_health, event_source, ... }, ts, text, ... }
+# Cloudflare sends the shared secret in the cf-webhook-auth header; the
+# Pipeline's verify task checks it against the cloudflare-webhook-secret Secret.
+# The CEL filter below only cheaply pre-screens on alert_type; the data field
+# names are confirmed from the first real payload (the EventListener logs it).
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: cloudflare-lb-health
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  params:
+    - name: webhook_auth
+      value: $(header.cf-webhook-auth)
+    - name: pool_name
+      value: $(body.data.pool_name)
+    - name: new_health
+      value: $(body.data.new_health)
+    - name: alert_event
+      value: $(body.alert_event)
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerTemplate
+metadata:
+  name: dr-failover
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  params:
+    - name: webhook_auth
+    - name: pool_name
+      default: ""
+    - name: new_health
+      default: ""
+    - name: alert_event
+      default: ""
+  resourcetemplates:
+    - apiVersion: tekton.dev/v1
+      kind: PipelineRun
+      metadata:
+        generateName: dr-failover-webhook-
+        namespace: odoo
+        labels:
+          app.kubernetes.io/part-of: odoo-dr
+          dr.odoo/source: webhook
+      spec:
+        pipelineRef:
+          name: dr-failover
+        taskRunTemplate:
+          serviceAccountName: dr-failover
+        params:
+          - { name: source,       value: webhook }
+          - { name: webhook_auth, value: $(tt.params.webhook_auth) }
+          - { name: pool_name,    value: $(tt.params.pool_name) }
+          - { name: new_health,   value: $(tt.params.new_health) }
+          # THE HUMAN GATE. "false" = Phase 2a (verify, then wait for a person).
+          # Change to "true" for Phase 2b (fully automatic promotion).
+          - { name: auto_promote, value: "false" }
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: dr-failover
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  serviceAccountName: dr-failover
+  triggers:
+    - name: cloudflare-pool-unhealthy
+      interceptors:
+        - ref:
+            name: cel
+          params:
+            - name: filter
+              # Only the LB health alert, only when it STARTS (not the recovery END),
+              # and only when it concerns the active pool.
+              value: >-
+                body.alert_type == 'load_balancing_health_alert' &&
+                body.alert_event == 'ALERT_STATE_EVENT_START' &&
+                has(body.data) && has(body.data.pool_name) &&
+                body.data.pool_name == 'odoo-active'
+      bindings:
+        - ref: cloudflare-lb-health
+      template:
+        ref: dr-failover
+---
+# Public entry point for the webhook. Cloudflare only delivers to a publicly
+# resolvable host on 443. The ip_whitelist restricts callers to Cloudflare's
+# published ranges (https://www.cloudflare.com/ips-v4) — refresh periodically.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: dr-failover-webhook
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    haproxy.router.openshift.io/ip_whitelist: >-
+      173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22
+      141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20
+      197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13
+      104.24.0.0/14 172.64.0.0/13 131.0.72.0/22
+spec:
+  to:
+    kind: Service
+    name: el-dr-failover        # created by the EventListener
+  port:
+    targetPort: http-listener
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+# ── TRIGGER B: poller (works on ANY Cloudflare plan; no inbound webhook) ──
+#
+# Every minute, ask Cloudflare whether the active pool is healthy. After two
+# consecutive "unhealthy" answers, start the same dr-failover Pipeline with
+# source=poller. State is one line in a ConfigMap. Needs:
+#   Secret    cloudflare-api-token  (key: token — distributed by 03-secrets)
+#   ConfigMap cloudflare-lb-ids     (keys: account_id, active_pool_id — written by 06)
+# Delete this CronJob (or set suspend: true) when using the webhook trigger.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dr-poller
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  schedule: "* * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  suspend: false
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          serviceAccountName: dr-failover
+          restartPolicy: Never
+          containers:
+            - name: poll
+              image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+              env:
+                - name: CF_TOKEN
+                  valueFrom: { secretKeyRef: { name: cloudflare-api-token, key: token } }
+                - name: CF_ACCOUNT
+                  valueFrom: { configMapKeyRef: { name: cloudflare-lb-ids, key: account_id } }
+                - name: CF_POOL
+                  valueFrom: { configMapKeyRef: { name: cloudflare-lb-ids, key: active_pool_id } }
+                - name: THRESHOLD
+                  value: "2"                   # consecutive unhealthy polls before acting
+                - name: AUTO_PROMOTE
+                  value: "false"               # the human gate (same knob as the webhook path)
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  resp=$(curl -sS -H "Authorization: Bearer $CF_TOKEN" \
+                    "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT/load_balancers/pools/$CF_POOL")
+                  if echo "$resp" | grep -q '"healthy":true';  then healthy=true
+                  elif echo "$resp" | grep -q '"healthy":false'; then healthy=false
+                  else echo "unexpected API response: $resp"; exit 1; fi
+                  count=$(oc get configmap dr-poller-state -n odoo -o jsonpath='{.data.unhealthy_count}' 2>/dev/null || echo 0)
+                  if [ "$healthy" = "true" ]; then
+                    [ "$count" != "0" ] && echo "active pool healthy again; resetting counter"
+                    oc create configmap dr-poller-state -n odoo --from-literal=unhealthy_count=0 --dry-run=client -o yaml | oc apply -f - >/dev/null
+                    exit 0
+                  fi
+                  count=$((count + 1))
+                  echo "active pool UNHEALTHY ($count/$THRESHOLD consecutive)"
+                  oc create configmap dr-poller-state -n odoo --from-literal=unhealthy_count=$count --dry-run=client -o yaml | oc apply -f - >/dev/null
+                  [ "$count" -lt "$THRESHOLD" ] && exit 0
+                  # don't stack runs: skip if one is already in flight
+                  if oc get pipelinerun -n odoo -l dr.odoo/source=poller -o jsonpath='{.items[*].status.conditions[0].reason}' | grep -q Running; then
+                    echo "a dr-failover run is already in progress"; exit 0; fi
+                  echo "starting dr-failover (auto_promote=$AUTO_PROMOTE)"
+                  oc create -n odoo -f - <<EOF
+                  apiVersion: tekton.dev/v1
+                  kind: PipelineRun
+                  metadata:
+                    generateName: dr-failover-poller-
+                    labels: { app.kubernetes.io/part-of: odoo-dr, dr.odoo/source: poller }
+                  spec:
+                    pipelineRef: { name: dr-failover }
+                    taskRunTemplate: { serviceAccountName: dr-failover }
+                    params:
+                      - { name: source, value: poller }
+                      - { name: auto_promote, value: "$AUTO_PROMOTE" }
+                  EOF

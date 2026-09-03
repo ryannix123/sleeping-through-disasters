@@ -16,3 +16,7 @@ vault_pg_replicator_password: "change-me"     # PostgreSQL replication role
 vault_cloudflare_api_token: "change-me"       # needs Load Balancing edit
 vault_cloudflare_account_id: "change-me"
 vault_cloudflare_zone_id: "change-me"
+
+# Shared secret Cloudflare sends in the cf-webhook-auth header
+# (Notifications -> Destinations -> Webhooks). Generate: openssl rand -hex 32
+vault_cloudflare_webhook_secret: "CHANGE_ME"

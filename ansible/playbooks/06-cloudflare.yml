@@ -182,6 +182,26 @@
         passive_pool_id: >-
           {{ (cf_pools_final.json.result | selectattr('name', 'equalto', passive_pool_name) | first).id }}
 
+    # The failover poller (clusters/passive/failover) reads pool health by id.
+    # Record the ids on the hub (== passive cluster) so nothing is hard-coded.
+    - name: Publish Cloudflare ids for the failover automation
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: cloudflare-lb-ids
+            namespace: "{{ odoo_namespace | default('odoo') }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          data:
+            account_id: "{{ vault_cloudflare_account_id }}"
+            active_pool_id: "{{ active_pool_id }}"
+            passive_pool_id: "{{ passive_pool_id }}"
+            hostname: "{{ cloudflare_hostname }}"
+
     # ── Load balancer ───────────────────────────────────────────────────────
     - name: List existing load balancers
       ansible.builtin.uri:

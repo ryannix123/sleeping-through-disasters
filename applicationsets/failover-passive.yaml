@@ -1,9 +1,9 @@
 ---
-# Odoo scaled to zero on the passive cluster until failover.
+# Failover automation (Tekton Pipeline + triggers) on the passive cluster.
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: odoo-app-passive
+  name: odoo-failover-passive
   namespace: openshift-gitops
   labels:
     app.kubernetes.io/part-of: odoo-dr
@@ -20,7 +20,7 @@ spec:
         requeueAfterSeconds: 180
   template:
     metadata:
-      name: 'odoo-app-passive-{{.name}}'
+      name: 'odoo-failover-passive-{{.name}}'
       labels:
         app.kubernetes.io/part-of: odoo-dr
     spec:
@@ -28,19 +28,10 @@ spec:
       source:
         repoURL: https://github.com/ryannix123/sleeping-through-disasters.git
         targetRevision: main
-        path: clusters/passive/odoo
+        path: clusters/passive/failover
       destination:
         name: '{{.name}}'
         namespace: odoo
-      # The failover Pipeline scales this Deployment 0 -> 1 at runtime. Git
-      # says 0 (pilot-light). Without this, Argo self-heals the scale-up back
-      # to 0 within seconds — observed during the first failover test.
-      ignoreDifferences:
-        - group: apps
-          kind: Deployment
-          name: odoo
-          jsonPointers:
-            - /spec/replicas
       syncPolicy:
         automated:
           prune: true
@@ -48,7 +39,6 @@ spec:
         syncOptions:
           - CreateNamespace=true
           - ServerSideApply=true
-          - RespectIgnoreDifferences=true
         retry:
           limit: 10
           backoff:

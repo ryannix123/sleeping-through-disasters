@@ -1,0 +1,17 @@
+---
+# OpenShift Pipelines (Tekton) — the failover executor. Included with the
+# OpenShift subscription. Receives the "active is down" signal (webhook or
+# poller) and runs the promotion Pipeline. See clusters/passive/failover/.
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: openshift-pipelines-operator-rh
+  namespace: openshift-operators
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  channel: latest
+  name: openshift-pipelines-operator-rh
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  installPlanApproval: Automatic

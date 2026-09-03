@@ -159,47 +159,80 @@ Failing *back* to the original region means doing this whole procedure again in 
 
 ## Sleeping through disasters: automating Phase 2
 
-The name of the pattern is the aspiration. Phase 1 already achieves it. Phase 2 is manual by default because automatic promotion during a partition is how you get split-brain.
+Phase 2 is automated by **`clusters/passive/failover/`** — an OpenShift
+Pipelines (Tekton) Pipeline named `dr-failover` that runs on the surviving
+cluster with in-cluster credentials only. Design and rationale:
+[DESIGN-DECISIONS.md §4](DESIGN-DECISIONS.md).
 
-Three patterns make automation safe:
-
-**Multi-source validation.** Require several independent observers to agree before promoting: Cloudflare health checks, an external synthetic monitor, the ACM `ManagedCluster` status on the hub, and the standby's own view of replication. Promote only when all agree for more than five minutes. Independent observers failing simultaneously is either a real outage or an event severe enough that failing over is still right.
-
-**Fencing.** Before promoting, make it impossible for the old primary to accept writes — scale its CNPG cluster to zero, cut its egress with a NetworkPolicy, or detach its storage through the cloud API. If you can fence, split-brain becomes impossible rather than unlikely.
-
-**Quorum.** An external lease holder (etcd, Consul, a hub controller) decides who is primary. Most robust, most infrastructure.
-
-### A realistic progression
-
-1. **Today** — Cloudflare automates traffic; a human runs Phase 2
-2. **Next** — Cloudflare webhook triggers Event-Driven Ansible, which gathers evidence and pre-stages the failover; a human approves with one click
-3. **Then** — after six months with no false positives, automate promotion behind multi-source validation
-4. **Finally** — add fencing
-
-### What "sleeping through it" looks like at step 4
+### What it does
 
 ```
-03:42  Region A loses power
-03:45  Cloudflare marks the pool unhealthy, DNS shifts to region B
-03:45  Webhook fires into AAP; EDA rulebook starts
-03:48  Four independent sources agree region A is gone; fencing runs
-03:48  Commit: replica.enabled=false, replicas=1
-03:51  PostgreSQL promoted, Odoo pods Ready
-03:52  Filestore restored; Slack: "Failover complete."
-08:00  You wake up to a recovered system and a thread to read.
+signal ──▶ verify ──▶ promote ──▶ scale ──▶ Cloudflare flips passive green
+           │
+           ├─ webhook? check cf-webhook-auth against the Secret; reject if wrong
+           ├─ already primary?          → stop (nothing to do)
+           └─ WAL still streaming from the primary over the VAN?
+                                          → REFUSE (site is alive; edge-only outage)
 ```
 
-| Approach | RTO | Risk | Effort |
-|---|---|---|---|
-| Fully manual | 30+ min | low | none |
-| Cloudflare + manual Phase 2 *(today)* | 5–10 min | low | done |
-| EDA pre-staged + human approval | 3–5 min | low | medium |
-| Fully automatic + validation | 2–4 min | medium | high |
-| Fully automatic + fencing | 2–4 min | low | high |
+`promote` and `scale` only run when verify's decision is `promote` **and** the
+`auto_promote` parameter is `"true"`.
 
-Most organisations stop at row 2 because the marginal RTO gain is not worth the complexity. The path is documented so the choice is deliberate.
+### Two triggers, one pipeline
 
----
+**Webhook** (Cloudflare Pro+ zone required for generic webhooks):
+
+1. Get the receiver URL:
+   `oc get route dr-failover-webhook -n odoo -o jsonpath='https://{.spec.host}{"\n"}'`
+2. Cloudflare dashboard → **Notifications → Destinations → Webhooks → Create**:
+   that URL, and the secret from your vault (`vault_cloudflare_webhook_secret`).
+   *Save and Test* — the test POST is rejected by the CEL filter (no
+   `alert_type`), which is correct; check `oc logs -n odoo deploy/el-dr-failover`.
+3. **Notifications → Add → Load Balancing Health Alert** → pool `odoo-active`,
+   health `Unhealthy`, destination: the webhook.
+4. Suspend the poller so both don't fire: `oc patch cronjob dr-poller -n odoo -p '{"spec":{"suspend":true}}'`
+   (or set `suspend: true` in Git).
+
+**Poller** (any plan; the default as committed): the `dr-poller` CronJob asks
+the Cloudflare API every minute whether `odoo-active` is healthy and starts
+the Pipeline after two consecutive *unhealthy* answers. Needs the
+`cloudflare-api-token` Secret (`03-secrets`) and the `cloudflare-lb-ids`
+ConfigMap (`06-cloudflare`).
+
+### The human gate
+
+As committed, `auto_promote` is `"false"` everywhere (Phase 2a): a signal
+produces a `PipelineRun` that verifies and stops with
+
+```
+GATED. Conditions for promotion are met but auto_promote=false.
+```
+
+A human then promotes with one command:
+
+```bash
+tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true --serviceaccount dr-failover --showlog
+```
+
+For fully automatic failover (Phase 2b) set `auto_promote` to `"true"` in the
+TriggerTemplate (webhook) or the poller's `AUTO_PROMOTE` env, and commit.
+
+### Running it by hand, and watching
+
+```bash
+# dry verification only (no changes)
+tkn pipeline start dr-failover -n odoo -p source=manual --serviceaccount dr-failover --showlog
+
+# history — every failover is a PipelineRun with logs
+tkn pipelinerun list -n odoo
+tkn pipelinerun logs -n odoo <name>
+```
+
+### What is NOT automated yet
+
+The **return** of the original region — bringing the old active back as a
+replica of the promoted site — is a separate reconcile pipeline, still to be
+designed. Until then, follow "After the old region returns" above.
 
 ## Troubleshooting
 
