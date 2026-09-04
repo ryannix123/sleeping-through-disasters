@@ -447,6 +447,41 @@ Harmless under the human gate; wrong for unattended operation. The poller now
 idles when the passive is already promoted and never re-fires within 10
 minutes of a previous run.
 
+
+### 5g. The control plane must never be able to delete the data plane (FIXED)
+
+The morning after the failover, the active site's `odoo` namespace had been
+rebuilt from scratch — demo data, the customer records created during the
+test gone from both sides. The exact trigger is not proven (the leading
+hypothesis is that re-registering the `GitOpsCluster` to refresh Argo's
+credentials regenerated Applications, with the cascading delete on the
+powered-off active site executing when it came back online). The mechanism,
+however, is certain and is the default behaviour of Argo CD: every Application
+an ApplicationSet generates carries `resources-finalizer.argocd.argoproj.io`,
+so deleting or regenerating an Application deletes every resource it owns —
+the database Cluster and its volumes included.
+
+*"My important customer records are gone"* is the one disaster this pattern
+must make impossible, and it was one control-plane operation away. Two layers
+now prevent it:
+
+1. **ApplicationSets** set `preserveResourcesOnDeletion: true` (no finalizer:
+   deleting an Application orphans its resources, which a new Application
+   simply re-adopts) and `applicationsSync: create-update` (the generator may
+   create and update Applications but **never delete** them, so a changed
+   cluster secret cannot cascade).
+2. **Data-bearing resources** — both CNPG `Cluster`s, both `odoo-data` PVCs,
+   and the `odoo` Namespace — carry
+   `argocd.argoproj.io/sync-options: Prune=false,Delete=false`. Even if a
+   manifest is removed from Git or an Application is deleted by hand, Argo
+   will not delete them.
+
+The trade-off is explicit: stale resources can now be orphaned and must be
+removed by a human ([TEARDOWN.md](TEARDOWN.md) already deletes the namespace
+directly, so teardown is unaffected). That is the correct direction for the
+error to fall. GitOps owns the desired state of the platform; it does not own
+the right to destroy the customer's data.
+
 ### 5e. Measured numbers
 
 - **RPO, database:** seconds (12–13 s steady-state lag; probe row visible in <5 s).

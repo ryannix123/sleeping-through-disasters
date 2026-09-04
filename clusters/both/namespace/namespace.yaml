@@ -11,3 +11,6 @@ metadata:
   annotations:
     openshift.io/display-name: "Odoo ERP"
     openshift.io/description: "Odoo 19 Community — business of record for the DR pattern"
+    # Argo must never delete this namespace — not on prune, not on Application
+    # deletion. Everything in it is customer data.
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false

@@ -3,6 +3,15 @@
 How to remove every component the pattern deploys, in an order that actually
 works. Use this before a fresh redeploy, or to decommission.
 
+## Note: Argo no longer cascades deletes (by design)
+
+Since the data-plane protection in [DESIGN-DECISIONS.md §5g](DESIGN-DECISIONS.md),
+deleting an Application or ApplicationSet **orphans** its resources instead of
+deleting them, and the CNPG Clusters, `odoo-data` PVCs and the `odoo` namespace
+are annotated so Argo never deletes them at all. Teardown therefore relies on
+the direct `oc delete namespace` in step 3 — which it always did — and you
+will not see Argo remove workloads on its own. This is intentional.
+
 ## The one rule: delete the source, not the symptom
 
 Everything on the managed clusters is owned by Argo CD, which is driven by

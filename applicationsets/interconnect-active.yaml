@@ -11,6 +11,16 @@ spec:
   goTemplate: true
   goTemplateOptions:
     - missingkey=error
+  # DATA-PLANE PROTECTION. By default a generated Application carries the
+  # resources finalizer, so deleting or regenerating it deletes every resource
+  # it owns — databases and volumes included. Observed: control-plane churn
+  # (re-registering the GitOpsCluster) rebuilt the odoo namespace from scratch.
+  # A DR pattern's control plane must never be able to delete the data it
+  # protects: Applications may be created and updated, never deleted by the
+  # generator, and deleting one orphans (re-adopts later) its resources.
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+    applicationsSync: create-update
   generators:
     - clusterDecisionResource:
         configMapRef: acm-placement
