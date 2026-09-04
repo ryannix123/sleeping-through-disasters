@@ -223,3 +223,35 @@ kubeconfig, and `managed_cluster_name` for the passive host is `local-cluster`.
 Nothing here is a fork. When you have real clusters, drop the overlay and point
 the ApplicationSets back at `clusters/`. The two-tier database design, the
 anti-affinity, and the RPO ~0 claim come back with no other change.
+
+
+## The single-node hub's pod budget
+
+A SNO hub is capped at **250 pods**. ACM + MCE + ODF alone consume ~95, and
+installing OpenShift Pipelines (full profile) adds ~13. The first failover
+test hit `0/1 nodes are available: Too many pods` — the pipeline could not
+even schedule. What helped, in order of cost:
+
+| Lever | Pods freed | Notes |
+| --- | --- | --- |
+| `TektonConfig` profile `basic` (pipelines + triggers only) | ~6 | `oc patch tektonconfig config --type merge -p '{"spec":{"profile":"basic"}}'` |
+| MCE: disable `hive`, `hypershift`, `hypershift-local-hosting`, `assisted-service`, `discovery` | ~10 | Provisioning/discovery components; this pattern *imports* clusters |
+| ACM: disable `search`, `insights`, `submariner-addon`, `cluster-backup` | ~8 | Not used by the pattern |
+| Remove unrelated operators (e.g. OpenShift Lightspeed) | ~6 | Demo leftovers |
+| `KubeletConfig` raising `maxPods` (e.g. 500) | — | The durable fix; **reboots the node** (~10 min hub outage). Plan it. |
+
+**Never disable ACM's `app-lifecycle`.** It looks like the ACM
+Application-subscription model this pattern does not use, but it also runs
+`multicluster-integrations` — the `GitOpsCluster` controller that mints and
+refreshes the tokens Argo CD uses to reach every managed cluster. With it off,
+Argo lost its credentials within the hour (`the server has asked for the
+client to provide credentials` on every sync). Recovery required re-minting
+the `ManagedServiceAccount` token and restarting the Argo application
+controller.
+
+## What the passive site costs
+
+The AWS SNO that is both the ACM hub and the warm passive site cost
+**$33.92 for nine days** on the Red Hat demo platform — one instance and a
+20 GB Ceph volume. That is the pilot-light number: the standby *database* runs
+continuously, the application does not, and the bill reflects it.

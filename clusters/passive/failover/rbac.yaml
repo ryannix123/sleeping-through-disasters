@@ -36,6 +36,19 @@ rules:
   - apiGroups: ["tekton.dev"]
     resources: ["pipelineruns"]
     verbs: ["create", "get", "list"]      # the poller creates PipelineRuns
+  # restore-filestore: rebuild the app PVC from VolSync's latest snapshot
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["get", "list"]
+  - apiGroups: ["volsync.backube"]
+    resources: ["replicationdestinations"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]                        # promote: read odoo-db-app to sync the role password
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -84,4 +97,34 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: tekton-triggers-eventlistener-clusterroles
+  apiGroup: rbac.authorization.k8s.io
+---
+# Failover mode (dr-suspend-gitops) patches the passive-site Argo Applications,
+# which live on this cluster (the hub) in openshift-gitops.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dr-failover-argo
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dr-failover-argo
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+subjects:
+  - kind: ServiceAccount
+    name: dr-failover
+    namespace: odoo
+roleRef:
+  kind: Role
+  name: dr-failover-argo
   apiGroup: rbac.authorization.k8s.io

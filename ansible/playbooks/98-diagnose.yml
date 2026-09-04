@@ -251,6 +251,22 @@
           {{ (ppods.resources | map(attribute='metadata.name') | list
               | select('match', '^volsync-rsync-tls-dst-') | list | first) | default('') }}
 
+    - name: Find a passive Odoo app pod (normally none — pilot-light)
+      ansible.builtin.set_fact:
+        p_odoo_pod: >-
+          {{ (ppods.resources | map(attribute='metadata.name') | list
+              | select('match', '^odoo-(?!db)') | list | first) | default('') }}
+
+    - name: Count files on the passive APP volume (what Odoo would actually serve after failover)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ p_odoo_pod }}"
+        command: sh -c "find /var/lib/odoo -type f | wc -l"
+      register: p_app_files
+      when: p_odoo_pod | length > 0
+      failed_when: false
+
     - name: Count files on the destination volume (VolSync mounts it at /data)
       kubernetes.core.k8s_exec:
         kubeconfig: "{{ kubeconfig }}"
@@ -285,6 +301,7 @@
         p_link: "{{ pvan.results[3].resources | map(attribute='status.status') | list }}"
         p_pvcs: "{{ pvan.results[4].resources | map(attribute='metadata.name') | zip(pvan.results[4].resources | map(attribute='status.phase')) | map('join', '=') | list }}"
         p_files: "{{ (dst_files.stdout | default('n/a')) | trim | replace('\n',' files, ') }}"
+        p_app: "{{ ((p_app_files.stdout | default('')) | trim ~ ' files on the app volume') if p_odoo_pod | length > 0 else 'app scaled to 0 — app volume is empty until restore-filestore runs at failover' }}"
         p_rd_last: "{{ rd.resources[0].status.lastSyncTime | default('never') }}"
         p_rd_dur: "{{ rd.resources[0].status.lastSyncDuration | default('n/a') }}"
         p_rd_image: "{{ rd.resources[0].status.latestImage.name | default('none') }}"
@@ -302,7 +319,8 @@
           - "passive  : {{ passive_counts.stdout | trim }}"
           - "════════════ FILESTORE (VolSync rsync-tls over the VAN) ════════════"
           - "source   : {{ hostvars['active_site'].a_files }} · last sync {{ hostvars['active_site'].a_rs_last }} · took {{ hostvars['active_site'].a_rs_dur }} · next {{ hostvars['active_site'].a_rs_next }}"
-          - "dest     : {{ p_files }} · last sync {{ p_rd_last }} · took {{ p_rd_dur }} · latest snapshot {{ p_rd_image }}"
+          - "dest     : {{ p_files }} (VolSync destination volume) · last sync {{ p_rd_last }} · took {{ p_rd_dur }} · latest snapshot {{ p_rd_image }}"
+          - "passive  : {{ p_app }}   ← the volume Odoo mounts; NOT the same as the VolSync destination"
           - "════════════ VAN (Service Interconnect) ════════════"
           - "sites    : active sees {{ hostvars['active_site'].a_site_n }} · passive sees {{ p_site_n }} {{ '✔' if (hostvars['active_site'].a_site_n | int) >= 2 and (p_site_n | int) >= 2 else '✘ NOT LINKED' }}"
           - "active   : connectors={{ hostvars['active_site'].a_conn }} listeners={{ hostvars['active_site'].a_lstn }}"

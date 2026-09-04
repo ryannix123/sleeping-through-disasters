@@ -28,6 +28,14 @@ spec:
   bootstrap:
     pg_basebackup:
       source: odoo-db-active
+      # MUST match the source's initdb (clusters/active/postgres/cluster.yaml).
+      # pg_basebackup copies the source's roles and databases verbatim, but
+      # CNPG still generates this cluster's odoo-db-app Secret from these two
+      # fields — and defaults them to app/app if omitted. That produced a
+      # Secret for a role that did not exist in the replicated data, and Odoo
+      # could not log in to the database it had just failed over to.
+      database: odoo
+      owner: odoo
 
   externalClusters:
     - name: odoo-db-active

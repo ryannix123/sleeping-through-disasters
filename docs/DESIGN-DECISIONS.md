@@ -397,6 +397,78 @@ risk function adopt this incrementally.
 
 ---
 
+## 5. What the first live failover found (3 Sep 2026)
+
+The active site was powered off with no warning to the automation. Detection
+and the promotion decision worked first time; execution needed four manual
+interventions. All four are promotion-only defects — invisible in steady
+state, and the file-store one was masked by a validation check that reported
+green all week. **A DR pattern that has never been failed over is not a
+validated pattern.** Each finding below is now fixed in the repo.
+
+### 5a. GitOps reverted the failover (FIXED — "failover mode")
+
+Argo CD self-healed the passive site back to its declared standby state
+within seconds: `spec.replica.enabled` on the CNPG Cluster, `replicas: 0` on
+the Deployment, and the empty declared PVC. Three `ignoreDifferences` rules
+would paper over three symptoms and hide the real state change. Instead the
+pipeline has an explicit **failover mode**: `dr-suspend-gitops` pauses
+automated sync on the passive-site Applications (annotated
+`dr.odoo/failover-mode=true`) before any mutation, and the reset/return
+procedure re-enables it. The divergence from Git is deliberate, visible, and
+reversible. The existing `ignoreDifferences` on Deployment replicas stays as
+belt-and-braces.
+
+### 5b. The application could not log in to the database it had just promoted (FIXED)
+
+`pg_basebackup` copies the source's roles and databases verbatim (`odoo`/`odoo`),
+but CNPG generates the passive cluster's `odoo-db-app` Secret from
+`bootstrap.pg_basebackup.{database,owner}` — which default to `app`/`app` when
+omitted. Odoo read a Secret for a role that did not exist. Two fixes: the
+passive manifest now declares `database: odoo` / `owner: odoo` to match the
+source, and `dr-promote-database` syncs the role's password to the Secret
+after promotion (the replicated data still carries the *source's* password).
+
+### 5c. The file store came up empty (FIXED — `dr-restore-filestore`)
+
+VolSync replicates into its own destination PVC and snapshots it; the
+application's PVC is separate. Nothing restored the newest snapshot into the
+app volume before Odoo started, so the app had 946 attachment rows and no
+files. `dr-restore-filestore` now reads `ReplicationDestination.status.latestImage`,
+recreates the app PVC with that snapshot as `dataSource`, and runs between
+promote and scale. Note `98-diagnose` had reported matching file counts all
+week: it was counting the *destination* volume. It now also reports the app
+volume so the two can never be confused again.
+
+### 5d. The detector re-fired every minute (FIXED)
+
+While the pool stayed unhealthy the poller started a pipeline every minute.
+Harmless under the human gate; wrong for unattended operation. The poller now
+idles when the passive is already promoted and never re-fires within 10
+minutes of a previous run.
+
+### 5e. Measured numbers
+
+- **RPO, database:** seconds (12–13 s steady-state lag; probe row visible in <5 s).
+- **RPO, file store:** up to one sync interval (2 min). The last snapshot was
+  45 s before the outage.
+- **Promotion:** 7 seconds. Application cold start: ~90 s. Detection: ~3 min
+  (2 edge health checks + 2 poll confirmations). DNS TTL floor: 30 s.
+- **RTO:** not quoted until a clean run confirms it; the mechanical path
+  suggests ~5 minutes, dominated by detection sensitivity.
+
+### 5f. Reset vs. return
+
+`97-reset-after-failover.yml` restores steady state for *testing*: it disables
+the active pool at the edge **before** the old site is powered on (its
+database still believes it is primary), rebuilds the passive as a fresh
+replica, and discards post-failover writes. A true **return-to-origin** that
+preserves those writes — old active re-bootstrapped as a replica of the
+promoted site, then a planned switch back — is a separate design and the
+next piece of work.
+
+---
+
 ## Stack / SKU summary (the "better together" motion)
 
 | Product | Role in the pattern |

@@ -3,9 +3,12 @@
 # survivor) using only in-cluster credentials; nothing outside OpenShift holds
 # a cluster token. Three tasks, causally ordered:
 #
-#   verify   — reject bad callers; refuse if the primary is provably alive
-#   promote  — CNPG replica cluster -> primary  (only if verify said "promote")
-#   scale    — Odoo 0 -> 1, wait for /web/health (Cloudflare then flips)
+#   verify           — reject bad callers; refuse if the primary is provably alive
+#   suspend-gitops   — failover mode: pause Argo self-heal on the passive apps
+#   promote          — CNPG replica cluster -> primary; sync the app role password
+#   restore-filestore— rebuild the app PVC from VolSync's latest snapshot
+#   scale            — Odoo 0 -> 1, wait for /web/health (Cloudflare then flips)
+#   (all but verify run only if verify said "promote" AND auto_promote=true)
 #
 # The human gate is one parameter: auto_promote. With "false" (default), the
 # pipeline runs verify and STOPS, recording the decision — a human then starts
@@ -107,10 +110,116 @@ spec:
           pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
           rec=$(oc exec -n odoo "$pod" -c postgres -- psql -q -U postgres -tAc "SELECT pg_is_in_recovery()" 2>/dev/null || echo "?")
           echo "  $phase · pg_is_in_recovery=$rec"
-          if [ "$phase" = "Cluster in healthy state" ] && [ "$rec" = "f" ]; then echo "PROMOTED: $pod is primary and writable"; exit 0; fi
+          if [ "$phase" = "Cluster in healthy state" ] && [ "$rec" = "f" ]; then echo "PROMOTED: $pod is primary and writable"; break; fi
           sleep 5
+          [ "$i" = "60" ] && { echo "timed out waiting for promotion"; exit 1; }
         done
-        echo "timed out waiting for promotion"; exit 1
+        # The replicated data carries the SOURCE cluster's application password;
+        # the odoo-db-app Secret on this cluster carries a locally generated one.
+        # Make the role match the Secret so the application can log in.
+        user=$(oc get secret odoo-db-app -n odoo -o jsonpath='{.data.username}' | base64 -d)
+        pw=$(oc get secret odoo-db-app -n odoo -o jsonpath='{.data.password}' | base64 -d)
+        oc exec -n odoo "$pod" -c postgres -- psql -q -U postgres -v ON_ERROR_STOP=1 \
+          -c "ALTER ROLE \"$user\" WITH LOGIN PASSWORD '$pw'" \
+          && echo "application role '$user' password synced to Secret odoo-db-app" \
+          || { echo "could not set password for role '$user' — does the role exist? (check bootstrap.pg_basebackup.owner)"; exit 1; }
+---
+# Failover mode: stop Argo CD from self-healing the passive site back to its
+# "standby" desired state (replica.enabled=true, replicas=0, an empty PVC)
+# while we are deliberately diverging from it. Observed on the first live
+# failover: Argo un-promoted the database within seconds. The reset/return
+# procedure re-enables automated sync. This cluster is the hub, so the
+# Applications are reachable with in-cluster credentials.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dr-suspend-gitops
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Enter failover mode — pause Argo automated sync on the passive-site Applications.
+  params:
+    - name: applications
+      type: string
+      default: "odoo-postgres-passive-local-cluster odoo-app-passive-local-cluster odoo-volsync-passive-local-cluster"
+  steps:
+    - name: suspend
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        for app in $(params.applications); do
+          oc patch applications.argoproj.io "$app" -n openshift-gitops --type merge \
+            -p '{"spec":{"syncPolicy":{"automated":null}},"metadata":{"annotations":{"dr.odoo/failover-mode":"true"}}}' \
+            && echo "failover mode: automated sync paused on $app"
+        done
+---
+# The file store is replicated by VolSync into ITS OWN destination volume and
+# snapshotted; the application's PVC is separate. On the first live failover
+# Odoo started on a brand-new, empty volume with 946 attachment rows and no
+# files. This task rebuilds the application PVC from the newest snapshot.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: dr-restore-filestore
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+spec:
+  description: Recreate the application's filestore PVC from VolSync's latest snapshot.
+  params:
+    - name: pvc
+      type: string
+      default: odoo-data
+    - name: replication_destination
+      type: string
+      default: odoo-data
+  steps:
+    - name: restore
+      image: image-registry.openshift-image-registry.svc:5000/openshift/cli:latest
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        snap=$(oc get replicationdestination $(params.replication_destination) -n odoo -o jsonpath='{.status.latestImage.name}')
+        [ -n "$snap" ] || { echo "ReplicationDestination has no latestImage — nothing to restore from"; exit 1; }
+        ready=$(oc get volumesnapshot "$snap" -n odoo -o jsonpath='{.status.readyToUse}')
+        [ "$ready" = "true" ] || { echo "snapshot $snap is not readyToUse"; exit 1; }
+        echo "restoring $(params.pvc) from snapshot $snap ($(oc get volumesnapshot "$snap" -n odoo -o jsonpath='{.status.creationTime}'))"
+
+        # The app must not be holding the PVC. (Argo is in failover mode, so it won't recreate it.)
+        oc scale deployment odoo -n odoo --replicas=0
+        oc wait --for=delete pod -l app=odoo -n odoo --timeout=120s 2>/dev/null || true
+
+        # Read the existing claim's shape so the restored one matches the manifest.
+        sc=$(oc get pvc $(params.pvc) -n odoo -o jsonpath='{.spec.storageClassName}' 2>/dev/null || true)
+        size=$(oc get pvc $(params.pvc) -n odoo -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || true)
+        [ -n "$sc" ]   || sc=$(oc get volumesnapshot "$snap" -n odoo -o jsonpath='{.spec.source.persistentVolumeClaimName}' | xargs -I{} oc get pvc {} -n odoo -o jsonpath='{.spec.storageClassName}')
+        [ -n "$size" ] || size=$(oc get volumesnapshot "$snap" -n odoo -o jsonpath='{.status.restoreSize}')
+
+        oc delete pvc $(params.pvc) -n odoo --ignore-not-found --wait=true
+        oc apply -f - <<EOF
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: $(params.pvc)
+          namespace: odoo
+          labels:
+            app.kubernetes.io/part-of: odoo-dr
+          annotations:
+            dr.odoo/restored-from: "$snap"
+        spec:
+          accessModes: [ReadWriteOnce]
+          storageClassName: $sc
+          resources:
+            requests:
+              storage: $size
+          dataSource:
+            name: $snap
+            kind: VolumeSnapshot
+            apiGroup: snapshot.storage.k8s.io
+        EOF
+        echo "PVC $(params.pvc) recreated from $snap (binds when the application starts)"
 ---
 apiVersion: tekton.dev/v1
 kind: Task
@@ -148,7 +257,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: odoo-dr
 spec:
-  description: Verify the outage is real, promote the database, scale the application.
+  description: Verify the outage is real, enter failover mode, promote the database, restore the filestore, scale the application.
   params:
     - name: source
       type: string
@@ -174,15 +283,29 @@ spec:
         - { name: webhook_auth, value: $(params.webhook_auth) }
         - { name: pool_name,    value: $(params.pool_name) }
         - { name: new_health,   value: $(params.new_health) }
-    - name: promote
+    - name: suspend-gitops
       runAfter: [verify]
       when:
         - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
         - { input: $(params.auto_promote),          operator: in, values: ["true"] }
       taskRef:
+        name: dr-suspend-gitops
+    - name: promote
+      runAfter: [suspend-gitops]
+      when:
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        - { input: $(params.auto_promote),          operator: in, values: ["true"] }
+      taskRef:
         name: dr-promote-database
-    - name: scale
+    - name: restore-filestore
       runAfter: [promote]
+      when:
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        - { input: $(params.auto_promote),          operator: in, values: ["true"] }
+      taskRef:
+        name: dr-restore-filestore
+    - name: scale
+      runAfter: [restore-filestore]
       when:
         - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
         - { input: $(params.auto_promote),          operator: in, values: ["true"] }

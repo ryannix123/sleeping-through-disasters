@@ -177,6 +177,10 @@ spec:
                     false) healthy=false ;;
                     *)     echo "unexpected API response: $resp"; exit 1 ;;
                   esac
+                  # Already failed over? Then there is nothing for the poller to do
+                  # until the reset/return procedure makes this a standby again.
+                  if [ "$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.spec.replica.enabled}')" != "true" ]; then
+                    echo "passive is already promoted (replica.enabled != true); poller idle"; exit 0; fi
                   count=$(oc get configmap dr-poller-state -n odoo -o jsonpath='{.data.unhealthy_count}' 2>/dev/null || echo 0)
                   if [ "$healthy" = "true" ]; then
                     [ "$count" != "0" ] && echo "active pool healthy again; resetting counter"
@@ -187,9 +191,13 @@ spec:
                   echo "active pool UNHEALTHY ($count/$THRESHOLD consecutive)"
                   oc create configmap dr-poller-state -n odoo --from-literal=unhealthy_count=$count --dry-run=client -o yaml | oc apply -f - >/dev/null
                   [ "$count" -lt "$THRESHOLD" ] && exit 0
-                  # don't stack runs: skip if one is already in flight
+                  # don't stack runs: skip if one is in flight OR one fired in the last 10 minutes
                   if oc get pipelinerun -n odoo -l dr.odoo/source=poller -o jsonpath='{.items[*].status.conditions[0].reason}' | grep -q Running; then
                     echo "a dr-failover run is already in progress"; exit 0; fi
+                  last=$(oc get pipelinerun -n odoo -l dr.odoo/source=poller --sort-by=.metadata.creationTimestamp \
+                           -o jsonpath='{.items[-1:].metadata.creationTimestamp}' 2>/dev/null || true)
+                  if [ -n "$last" ] && [ $(( $(date +%s) - $(date -d "$last" +%s) )) -lt 600 ]; then
+                    echo "dr-failover already fired at $last (<10 min ago); not re-firing — a human decides at the gate"; exit 0; fi
                   echo "starting dr-failover (auto_promote=$AUTO_PROMOTE)"
                   oc create -n odoo -f - <<EOF
                   apiVersion: tekton.dev/v1

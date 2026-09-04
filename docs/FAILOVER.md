@@ -167,16 +167,18 @@ cluster with in-cluster credentials only. Design and rationale:
 ### What it does
 
 ```
-signal ──▶ verify ──▶ promote ──▶ scale ──▶ Cloudflare flips passive green
-           │
+signal ──▶ verify ──▶ suspend-gitops ──▶ promote ──▶ restore-filestore ──▶ scale ──▶ edge flips passive green
+           │              (failover mode)   (+ sync app    (app PVC from
+           │                                 password)      latest snapshot)
            ├─ webhook? check cf-webhook-auth against the Secret; reject if wrong
            ├─ already primary?          → stop (nothing to do)
            └─ WAL still streaming from the primary over the VAN?
                                           → REFUSE (site is alive; edge-only outage)
 ```
 
-`promote` and `scale` only run when verify's decision is `promote` **and** the
-`auto_promote` parameter is `"true"`.
+Everything after `verify` runs only when its decision is `promote` **and** the
+`auto_promote` parameter is `"true"`. Each step exists because the first live
+failover showed it was needed — see [DESIGN-DECISIONS.md §5](DESIGN-DECISIONS.md).
 
 ### Two triggers, one pipeline
 
@@ -232,11 +234,31 @@ KUBECONFIG=$HUB tkn pipelinerun list -n odoo
 KUBECONFIG=$HUB tkn pipelinerun logs -n odoo <name> -f
 ```
 
+### After a failover test: resetting to steady state
+
+**Do not simply power the old active site back on.** Its database still
+believes it is the primary, its Odoo will start, the edge will see the active
+pool healthy, and traffic will flip back to stale data — two primaries. Run
+the reset playbook *first*; it disables the active pool at the edge, then
+prompts you to power the site on:
+
+```bash
+cd ansible
+ansible-playbook playbooks/97-reset-after-failover.yml
+```
+
+It re-links the VAN, scales the passive Odoo to zero, **deletes the promoted
+passive database and lets Argo rebuild it as a fresh replica** of the active
+site, drops the restored filestore PVC, leaves failover mode (re-enables Argo
+automated sync), resumes the poller, and re-enables the active pool. Writes
+made on the passive site during the failover are discarded — this is a reset
+for testing, not a failback.
+
 ### What is NOT automated yet
 
-The **return** of the original region — bringing the old active back as a
-replica of the promoted site — is a separate reconcile pipeline, still to be
-designed. Until then, follow "After the old region returns" above.
+A true **return to origin** that preserves post-failover writes — the old
+active re-bootstrapped as a replica of the promoted site, then a planned
+switch back — is a separate design and the next piece of work.
 
 ## Troubleshooting
 

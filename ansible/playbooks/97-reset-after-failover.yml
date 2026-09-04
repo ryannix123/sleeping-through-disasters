@@ -1,0 +1,240 @@
+---
+# 97-reset-after-failover.yml — return the pattern to steady state after a
+# failover test: homelab ACTIVE, AWS PASSIVE, Argo automated sync restored.
+#
+# This is a RESET, not a FAILBACK. Writes made on the promoted (passive) site
+# during the failover are DISCARDED: the passive database is rebuilt as a
+# fresh replica of the active site. That is appropriate for a test. A real
+# return-to-origin that preserves post-failover writes is a separate design
+# (docs/DESIGN-DECISIONS.md) and is not what this playbook does.
+#
+# SPLIT-BRAIN GUARD: the active site's database still believes it is the
+# primary and its Odoo will start serving the moment the site powers on. So
+# this playbook DISABLES the active pool at the edge first, then asks you to
+# power the site on, then re-links, rebuilds the passive as a replica, and only
+# re-enables the active pool once the passive is demoted. Run it BEFORE you
+# power the active site on.
+#
+#   ansible-playbook playbooks/97-reset-after-failover.yml
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Edge — stop routing to the active pool before it comes back
+  hosts: hub
+  gather_facts: false
+  vars:
+    cf_api: https://api.cloudflare.com/client/v4
+    cf_headers:
+      Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+      Content-Type: application/json
+  tasks:
+    - name: Read pool ids published by 06-cloudflare
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: ConfigMap
+        name: cloudflare-lb-ids
+        namespace: odoo
+      register: ids
+
+    - name: Stash ids
+      ansible.builtin.set_fact:
+        active_pool_id: "{{ ids.resources[0].data.active_pool_id }}"
+
+    - name: Disable the active pool (traffic stays on passive)
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/pools/{{ active_pool_id }}"
+        headers: "{{ cf_headers }}"
+        method: PATCH
+        body_format: json
+        body: { enabled: false }
+        status_code: [200]
+
+    - name: Suspend the failover poller for the duration
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: CronJob
+        name: dr-poller
+        namespace: odoo
+        definition:
+          spec: { suspend: true }
+
+    - name: Now power the active site on
+      ansible.builtin.pause:
+        prompt: |-
+
+          The active pool is DISABLED at the edge and the poller is suspended.
+          Power the active (homelab) site on now. When `oc --kubeconfig=~/.kube/active.config get nodes`
+          answers, refresh its token if needed, then press Enter to continue.
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Active — confirm it is up and still a primary
+  hosts: active_site
+  gather_facts: false
+  tasks:
+    - name: Wait for the active CNPG cluster to be healthy
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ skupper_namespace }}"
+      register: acl
+      retries: 30
+      delay: 10
+      until: acl.resources | length > 0 and (acl.resources[0].status.phase | default('')) == 'Cluster in healthy state'
+
+    - name: Active is a primary (not in recovery)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ skupper_namespace }}"
+        pod: "{{ acl.resources[0].status.currentPrimary }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT pg_is_in_recovery()"
+      register: arec
+      failed_when: (arec.stdout | trim) != 'f'
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Re-establish the VAN link
+  ansible.builtin.import_playbook: 05-interconnect-link.yml
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Passive — demote and rebuild as a replica of active
+  hosts: passive_site
+  gather_facts: false
+  vars:
+    ns: "{{ skupper_namespace }}"
+  tasks:
+    - name: Scale the passive Odoo to zero (stop serving from passive)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: Deployment
+        name: odoo
+        namespace: "{{ ns }}"
+        definition:
+          spec: { replicas: 0 }
+
+    # A promoted CNPG cluster cannot simply be told "be a replica again": it
+    # has diverged. Delete it; Argo recreates it from Git, and it bootstraps
+    # from the active primary over the VAN (pg_basebackup) with the correct
+    # owner/database and a Secret that matches.
+    - name: Delete the promoted passive database cluster (data on passive is discarded)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ ns }}"
+        wait: true
+        wait_timeout: 300
+
+    - name: Delete the restored filestore PVC (Argo recreates the declared, empty one)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        kind: PersistentVolumeClaim
+        name: odoo-data
+        namespace: "{{ ns }}"
+        wait: true
+        wait_timeout: 120
+
+    - name: Leave failover mode — restore Argo automated sync on the passive apps
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        name: "{{ item }}"
+        namespace: openshift-gitops
+        definition:
+          metadata:
+            annotations:
+              dr.odoo/failover-mode: "false"
+              argocd.argoproj.io/refresh: hard
+          spec:
+            syncPolicy:
+              automated: { prune: true, selfHeal: true }
+      loop:
+        - odoo-postgres-passive-local-cluster
+        - odoo-app-passive-local-cluster
+        - odoo-volsync-passive-local-cluster
+
+    - name: Wait for Argo to recreate the passive cluster as a replica and for it to bootstrap
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ ns }}"
+      register: pcl
+      retries: 60
+      delay: 15
+      until: >-
+        pcl.resources | length > 0 and
+        (pcl.resources[0].spec.replica.enabled | default(false)) | bool and
+        (pcl.resources[0].status.phase | default('')) == 'Cluster in healthy state'
+
+    - name: Passive is in recovery (a replica again)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ pcl.resources[0].status.currentPrimary }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT pg_is_in_recovery()"
+      register: prec
+      failed_when: (prec.stdout | trim) != 't'
+
+    - name: Reset the poller's counter and resume it
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata: { name: dr-poller-state, namespace: "{{ ns }}" }
+          data: { unhealthy_count: "0" }
+
+    - name: Resume the poller
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: CronJob
+        name: dr-poller
+        namespace: "{{ ns }}"
+        definition:
+          spec: { suspend: false }
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Edge — re-enable the active pool
+  hosts: hub
+  gather_facts: false
+  vars:
+    cf_api: https://api.cloudflare.com/client/v4
+    cf_headers:
+      Authorization: "Bearer {{ vault_cloudflare_api_token }}"
+      Content-Type: application/json
+  tasks:
+    - name: Read pool ids
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: ConfigMap
+        name: cloudflare-lb-ids
+        namespace: odoo
+      register: ids
+
+    - name: Enable the active pool (traffic returns to active once its health check passes)
+      ansible.builtin.uri:
+        url: "{{ cf_api }}/accounts/{{ vault_cloudflare_account_id }}/load_balancers/pools/{{ ids.resources[0].data.active_pool_id }}"
+        headers: "{{ cf_headers }}"
+        method: PATCH
+        body_format: json
+        body: { enabled: true }
+        status_code: [200]
+
+    - name: Done
+      ansible.builtin.debug:
+        msg: >-
+          Steady state restored: active is primary, passive is a fresh replica,
+          Argo automated sync is back on, poller resumed, active pool enabled.
+          Run playbooks/98-diagnose.yml to confirm.
