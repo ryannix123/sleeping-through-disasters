@@ -15,7 +15,43 @@ Two topics:
 
 ## 1. Automated failover — making "sleep through it" literally true
 
-### The gap today
+> **STATUS (built & tested — supersedes "The gap today" below).** Implemented
+> as the OpenShift Pipelines pipeline `dr-failover` (see §4/§5), tested
+> end-to-end on 3 Sep 2026.
+>
+> **Automatic today?**
+> - **Detection & the decision — yes, always.** A poller (or a Cloudflare
+>   webhook) starts the pipeline; `verify` decides from two independent
+>   signals — the edge health check *and* the passive replica confirming WAL
+>   has stopped over the VAN — and refuses to promote a primary that is still
+>   alive.
+> - **Promotion -> filestore restore -> scale-up — automatic when enabled**,
+>   via one parameter, `auto_promote`:
+>   - `auto_promote=true` -> the whole chain runs unattended (suspend GitOps ->
+>     promote DB -> restore filestore -> scale Odoo). This is what makes the
+>     name literal, and **the pattern must ship this capability** — "Sleeping
+>     Through Disasters" is a claim, true only if the system can fail over with
+>     no human in the loop.
+>   - `auto_promote=false` (default) -> the pipeline verifies, reaches a
+>     `promote` decision, and stops at a human-confirmation gate.
+>
+> Same pipeline; the flag only chooses whether the last steps pause for a nod.
+> **Whether to enable lights-out promotion is the customer's decision, per
+> their requirements** — regulator, risk appetite, trust in the witness,
+> whether their ledger tolerates the split-brain edge case. The gate is a
+> supported *conservative configuration*, not the recommended ceiling: it
+> ships defaulted-on because a human confirming "the site is really gone" is
+> cheap insurance for a system of record, but a customer who needs to actually
+> sleep through the disaster turns it off, by design.
+>
+> **Still to prove:** a clean `auto_promote=true` run from detection through to
+> serving with zero touches (the gated path is tested; lights-out is the next
+> test, and it measures the RTO at the same time).
+>
+> The analysis below is the original pre-build reasoning; it explains *why* the
+> gate exists and remains accurate on that point.
+
+### The gap today (original pre-build plan)
 
 The shipped pattern fails over in three acts, and only the first is automatic:
 
@@ -503,6 +539,46 @@ promoted site, then a planned switch back — is a separate design and the
 next piece of work.
 
 ---
+
+---
+
+## 6. Active-active considered and deliberately not pursued (DECIDED)
+
+The question comes up naturally — if active/passive is "good," isn't
+active/active "best"? For this workload the answer is no, and it is recorded
+here so it does not get reopened as an assumed upgrade.
+
+**Active/passive is not the budget tier; for a system of record it is the
+correct design.** An ERP is a ledger: the value of a single authoritative
+write path is correctness, not cost. Active/passive gives seconds of database
+RPO and single-digit-minute RTO while guaranteeing exactly one source of truth
+at all times. That guarantee is a feature.
+
+**Active/active is a different set of trade-offs, not a strictly better one.**
+Taking writes in two regions at once buys near-zero RTO and full utilisation of
+both sites, at the cost of: cross-region write latency on every commit (or
+sharding, which sacrifices global consistency); conflict resolution pushed into
+the application; and a *harder* split-brain problem, needing a third site as a
+quorum witness. Most systems assumed to need active/active do not, once the
+cost and the consistency implications are priced in.
+
+**The real dial is cost vs. recovery time, within active/passive** — the
+pilot-light / warm / hot posture plus the human-gated -> fully-automated
+failover step (§1). That spectrum covers what almost every customer needs, and
+every step of it adds only components that do non-removable work. It never adds
+a product to win an architecture argument.
+
+**If a genuine active-active requirement exists**, the right response is not to
+bolt it onto this pattern. A consensus database (CockroachDB, YugabyteDB, or
+similar Raft/Paxos systems) handles multi-writer and split-brain natively — but
+it **replaces CloudNativePG**, requires **three or more sites** for quorum, and
+changes the support and licensing story. That is a separate reference
+architecture, named as such, outside the "Red Hat + CNCF only" dependency rule
+this pattern holds to (§1 alternative, §4).
+
+**Position:** active/passive with automated, quorum-gated failover is the
+destination for a system of record. We spend to buy down recovery time, not to
+run two truths at once.
 
 ## Stack / SKU summary (the "better together" motion)
 
