@@ -160,8 +160,15 @@ spec:
                   valueFrom: { configMapKeyRef: { name: cloudflare-lb-ids, key: active_pool_id } }
                 - name: THRESHOLD
                   value: "2"                   # consecutive unhealthy polls before acting
+                # The human gate. Sourced from a ConfigMap so it can be flipped
+                # with a single patch without rewriting the container's env list
+                # (a merge-patch on env replaces the WHOLE list and silently
+                # drops CF_TOKEN/CF_ACCOUNT/CF_POOL — observed 12 Sep 2026):
+                #   oc patch configmap dr-failover-config -n odoo --type merge \
+                #     -p '{"data":{"auto_promote":"true"}}'
                 - name: AUTO_PROMOTE
-                  value: "false"               # the human gate (same knob as the webhook path)
+                  valueFrom:
+                    configMapKeyRef: { name: dr-failover-config, key: auto_promote }
               command: ["/bin/bash", "-c"]
               args:
                 - |
@@ -212,3 +219,18 @@ spec:
                       - { name: source, value: poller }
                       - { name: auto_promote, value: "$AUTO_PROMOTE" }
                   EOF
+---
+# The failover gate, as data. "false" = Phase 2a (detect + prepare, human
+# confirms). "true" = Phase 2b (lights-out). Flip with a one-line patch; the
+# poller picks it up on its next run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-failover-config
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+data:
+  auto_promote: "false"

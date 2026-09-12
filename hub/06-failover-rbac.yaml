@@ -1,0 +1,36 @@
+---
+# RBAC for the failover pipeline's ServiceAccount to patch Argo CD objects.
+# These live in openshift-gitops (the hub), NOT in the odoo namespace, so they
+# are applied by the hub bootstrap (playbooks 03/04) rather than by the
+# failover Application — whose destination namespace is `odoo` and which
+# therefore did not create them on a fresh install (observed 12 Sep 2026:
+# dr-suspend-gitops failed with "cannot get resource applications").
+# Failover mode (dr-suspend-gitops) patches the passive-site Argo Applications,
+# which live on this cluster (the hub) in openshift-gitops.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dr-failover-argo
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dr-failover-argo
+  namespace: openshift-gitops
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+subjects:
+  - kind: ServiceAccount
+    name: dr-failover
+    namespace: odoo
+roleRef:
+  kind: Role
+  name: dr-failover-argo
+  apiGroup: rbac.authorization.k8s.io

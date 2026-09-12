@@ -73,7 +73,7 @@ spec:
 
         # 2. Are we already the primary? Then there's nothing to do.
         replica=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.spec.replica.enabled}')
-        if [ "$replica" != "true" ]; then decide already-primary "spec.replica.enabled=$replica — passive is already promoted"; exit 0; fi
+        if [ "$replica" != "true" ]; then decide already-primary "spec.replica.enabled=$replica — database already promoted; restore + scale still run"; exit 0; fi
 
         # 3. The witness: can this replica still hear the primary over the VAN?
         pod=$(oc get cluster.postgresql.cnpg.io odoo-db -n odoo -o jsonpath='{.status.currentPrimary}')
@@ -138,8 +138,11 @@ metadata:
   labels:
     app.kubernetes.io/part-of: odoo-dr
 spec:
-  description: Enter failover mode — pause Argo automated sync on the passive-site Applications.
+  description: Enter failover mode — freeze the passive-site ApplicationSets, then pause Argo automated sync on their Applications.
   params:
+    - name: applicationsets
+      type: string
+      default: "odoo-postgres-passive odoo-app-passive odoo-volsync-passive"
     - name: applications
       type: string
       default: "odoo-postgres-passive-local-cluster odoo-app-passive-local-cluster odoo-volsync-passive-local-cluster"
@@ -149,11 +152,28 @@ spec:
       script: |
         #!/bin/bash
         set -euo pipefail
+        # ORDER MATTERS. Pausing only the Applications is not enough: the
+        # ApplicationSet regenerates its Application on its own schedule, which
+        # restores syncPolicy.automated and silently undoes the pause — observed
+        # mid-failover on 12 Sep 2026, where it re-asserted replica.enabled=true
+        # seconds after promotion. Freeze the generators FIRST.
+        for appset in $(params.applicationsets); do
+          oc patch applicationsets.argoproj.io "$appset" -n openshift-gitops --type merge \
+            -p '{"spec":{"syncPolicy":{"applicationsSync":"create-only"}},"metadata":{"annotations":{"dr.odoo/failover-mode":"true"}}}' \
+            && echo "failover mode: generator frozen (create-only) on $appset"
+        done
         for app in $(params.applications); do
           oc patch applications.argoproj.io "$app" -n openshift-gitops --type merge \
             -p '{"spec":{"syncPolicy":{"automated":null}},"metadata":{"annotations":{"dr.odoo/failover-mode":"true"}}}' \
             && echo "failover mode: automated sync paused on $app"
         done
+        # Verify the pause actually held before the pipeline mutates anything.
+        sleep 5
+        for app in $(params.applications); do
+          if [ -n "$(oc get applications.argoproj.io "$app" -n openshift-gitops -o jsonpath='{.spec.syncPolicy.automated}')" ]; then
+            echo "ERROR: $app still has automated sync after the pause — aborting before promotion"; exit 1; fi
+        done
+        echo "failover mode confirmed on all passive-site Applications"
 ---
 # The file store is replicated by VolSync into ITS OWN destination volume and
 # snapshotted; the application's PVC is separate. On the first live failover
@@ -286,7 +306,7 @@ spec:
     - name: suspend-gitops
       runAfter: [verify]
       when:
-        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote", "already-primary"] }
         - { input: $(params.auto_promote),          operator: in, values: ["true"] }
       taskRef:
         name: dr-suspend-gitops
@@ -300,14 +320,20 @@ spec:
     - name: restore-filestore
       runAfter: [promote]
       when:
-        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        # A resumed failover reports already-primary: promotion is done, but the
+        # filestore restore and the scale-up still have to run. Only `promote`
+        # is skipped in that case.
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote", "already-primary"] }
         - { input: $(params.auto_promote),          operator: in, values: ["true"] }
       taskRef:
         name: dr-restore-filestore
     - name: scale
       runAfter: [restore-filestore]
       when:
-        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote"] }
+        # A resumed failover reports already-primary: promotion is done, but the
+        # filestore restore and the scale-up still have to run. Only `promote`
+        # is skipped in that case.
+        - { input: $(tasks.verify.results.decision), operator: in, values: ["promote", "already-primary"] }
         - { input: $(params.auto_promote),          operator: in, values: ["true"] }
       taskRef:
         name: dr-scale-application
@@ -331,6 +357,10 @@ spec:
               echo "decision     : $(params.decision)"
               echo "reason       : $(params.reason)"
               echo "auto_promote : $(params.gate)"
+              if [ "$(params.decision)" = "already-primary" ]; then
+                echo
+                echo "Database was already promoted; the filestore restore and scale-up ran (or were gated)."
+              fi
               if [ "$(params.decision)" = "promote" ] && [ "$(params.gate)" != "true" ]; then
                 echo
                 echo "GATED. Conditions for promotion are met but auto_promote=false."

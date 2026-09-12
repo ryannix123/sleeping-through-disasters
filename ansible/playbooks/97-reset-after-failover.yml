@@ -139,6 +139,26 @@
         wait: true
         wait_timeout: 120
 
+    - name: Leave failover mode — unfreeze the passive ApplicationSets
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: argoproj.io/v1alpha1
+        kind: ApplicationSet
+        name: "{{ item }}"
+        namespace: openshift-gitops
+        definition:
+          metadata:
+            annotations:
+              dr.odoo/failover-mode: "false"
+          spec:
+            syncPolicy:
+              applicationsSync: sync
+      loop:
+        - odoo-postgres-passive
+        - odoo-app-passive
+        - odoo-volsync-passive
+
     - name: Leave failover mode — restore Argo automated sync on the passive apps
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -184,6 +204,16 @@
         command: psql -q -U postgres -tAc "SELECT pg_is_in_recovery()"
       register: prec
       failed_when: (prec.stdout | trim) != 't'
+
+    - name: Reset the failover gate to its default (human-confirmed)
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata: { name: dr-failover-config, namespace: "{{ ns }}" }
+          data: { auto_promote: "false" }
 
     - name: Reset the poller's counter and resume it
       kubernetes.core.k8s:

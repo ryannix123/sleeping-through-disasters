@@ -7,3 +7,4 @@ resources:
   - 03-placement-passive.yaml
   - 04-placement-both.yaml
   - 05-gitopscluster.yaml
+  - 06-failover-rbac.yaml
