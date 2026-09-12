@@ -1,0 +1,233 @@
+---
+# 00-predemo-check.yml — "is the stage set?"
+#
+# Run this immediately BEFORE a recorded failover. It is read-only: it changes
+# nothing and asserts nothing about the pattern's correctness (that is
+# 98-diagnose's job). It checks the things that have silently ruined a take:
+#
+#   * the failover gate is the value you think it is   (12 Sep: it was not)
+#   * the ApplicationSets are NOT frozen from a previous run
+#   * the passive Applications still have automated sync (i.e. failover mode
+#     was properly left behind)
+#   * VolSync has a recent snapshot for restore-filestore to restore from
+#   * the poller is running, its counter is zero, and no stale PipelineRuns are
+#     in the list to confuse the recording
+#   * the active site is genuinely serving right now
+#
+# Every check prints PASS/FAIL; the play fails at the end if anything is red,
+# so you find out before you pull the plug rather than after.
+#
+#   ansible-playbook playbooks/00-predemo-check.yml
+#   ansible-playbook playbooks/00-predemo-check.yml -e expect_auto_promote=false
+
+- name: Pre-demo readiness check
+  hosts: hub
+  gather_facts: false
+  vars:
+    ns: "{{ odoo_namespace | default('odoo') }}"
+    expect_auto_promote: "true"          # what the gate SHOULD be for this take
+    max_snapshot_age_minutes: 10
+    checks: []
+  tasks:
+    # ── the failover gate ────────────────────────────────────────────────────
+    - name: Read the failover gate
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: ConfigMap
+        name: dr-failover-config
+        namespace: "{{ ns }}"
+      register: gate_cm
+
+    - name: Check the gate is set as intended
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'failover gate (auto_promote)',
+          'ok': (gate_cm.resources | length > 0) and ((gate_cm.resources[0].data.auto_promote | default('')) == expect_auto_promote),
+          'detail': 'is \"' ~ (gate_cm.resources[0].data.auto_promote | default('MISSING')) ~ '\", expected \"' ~ expect_auto_promote ~ '\"' ~
+                    ('  → oc patch configmap dr-failover-config -n ' ~ ns ~ ' --type merge -p ' ~ \"'\" ~ '{\"data\":{\"auto_promote\":\"' ~ expect_auto_promote ~ '\"}}' ~ \"'\"
+                     if (gate_cm.resources | length > 0) and ((gate_cm.resources[0].data.auto_promote | default('')) != expect_auto_promote) else '')
+        }] }}"
+
+    # ── failover mode must NOT still be on from a previous run ───────────────
+    - name: Read the passive ApplicationSets
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: argoproj.io/v1alpha1
+        kind: ApplicationSet
+        namespace: openshift-gitops
+        name: "{{ item }}"
+      register: appsets
+      loop: [odoo-postgres-passive, odoo-app-passive, odoo-volsync-passive]
+      loop_control: { label: "{{ item }}" }
+
+    - name: Check no ApplicationSet is left frozen
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'ApplicationSets not frozen',
+          'ok': (appsets.results | map(attribute='resources') | map('first') |
+                 map(attribute='spec.syncPolicy.applicationsSync', default='sync') |
+                 select('equalto','create-only') | list | length) == 0,
+          'detail': 'frozen: ' ~ (appsets.results | selectattr('resources') |
+                    selectattr('resources.0.spec.syncPolicy.applicationsSync', 'defined') |
+                    selectattr('resources.0.spec.syncPolicy.applicationsSync','equalto','create-only') |
+                    map(attribute='item') | list | join(', ') | default('none', true)) ~
+                    '  → run 97-reset-after-failover.yml'
+        }] }}"
+
+    - name: Read the passive Applications
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: argoproj.io/v1alpha1
+        kind: Application
+        namespace: openshift-gitops
+        name: "{{ item }}"
+      register: apps
+      loop:
+        - odoo-postgres-passive-local-cluster
+        - odoo-app-passive-local-cluster
+        - odoo-volsync-passive-local-cluster
+      loop_control: { label: "{{ item }}" }
+
+    - name: Check the passive Applications have automated sync (failover mode is OFF)
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'passive Applications in normal (non-failover) mode',
+          'ok': (apps.results | map(attribute='resources') | map('first') |
+                 rejectattr('spec.syncPolicy.automated','defined') | list | length) == 0,
+          'detail': 'still paused: ' ~ (apps.results | selectattr('resources') |
+                    rejectattr('resources.0.spec.syncPolicy.automated','defined') |
+                    map(attribute='item') | list | join(', ') | default('none', true)) ~
+                    '  → run 97-reset-after-failover.yml'
+        }] }}"
+
+    # ── the passive database must be a replica, not already promoted ─────────
+    - name: Read the passive CNPG cluster
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: postgresql.cnpg.io/v1
+        kind: Cluster
+        name: odoo-db
+        namespace: "{{ ns }}"
+      register: pcl
+
+    - name: Check the passive database is a standby
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'passive database is a replica',
+          'ok': (pcl.resources | length > 0) and ((pcl.resources[0].spec.replica.enabled | default(false)) | bool)
+                and ((pcl.resources[0].status.phase | default('')) == 'Cluster in healthy state'),
+          'detail': 'replica.enabled=' ~ (pcl.resources[0].spec.replica.enabled | default('?')) ~
+                    ' phase=' ~ (pcl.resources[0].status.phase | default('?')) ~
+                    '  (if already promoted, the failover has nothing to demonstrate — run 97-reset)'
+        }] }}"
+
+    # ── VolSync must have a recent snapshot to restore from ─────────────────
+    - name: Read the VolSync ReplicationDestination
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: volsync.backube/v1alpha1
+        kind: ReplicationDestination
+        name: odoo-data
+        namespace: "{{ ns }}"
+      register: rd
+
+    - name: Check a recent filestore snapshot exists
+      vars:
+        last: "{{ rd.resources[0].status.lastSyncTime | default('') }}"
+        age_min: "{{ ((now(utc=True) - (last | to_datetime('%Y-%m-%dT%H:%M:%SZ'))).total_seconds() / 60) | round(1) if last else 99999 }}"
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'recent filestore snapshot for restore-filestore',
+          'ok': (rd.resources | length > 0) and ((rd.resources[0].status.latestImage.name | default('')) | length > 0)
+                and ((age_min | float) <= (max_snapshot_age_minutes | float)),
+          'detail': 'latestImage=' ~ (rd.resources[0].status.latestImage.name | default('NONE')) ~
+                    ' lastSync=' ~ (last | default('never')) ~ ' (' ~ age_min ~ ' min ago)' ~
+                    '  — anything written after this will NOT survive the failover'
+        }] }}"
+
+    # ── the poller and a clean run list ─────────────────────────────────────
+    - name: Read the poller CronJob and its state
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: "{{ item.kind }}"
+        name: "{{ item.name }}"
+        namespace: "{{ ns }}"
+      register: poller
+      loop:
+        - { kind: CronJob,   name: dr-poller }
+        - { kind: ConfigMap, name: dr-poller-state }
+      loop_control: { label: "{{ item.name }}" }
+
+    - name: Check the poller is armed and its counter is zero
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'poller running, counter at zero',
+          'ok': (poller.results[0].resources | length > 0)
+                and not ((poller.results[0].resources[0].spec.suspend | default(false)) | bool)
+                and ((poller.results[1].resources[0].data.unhealthy_count | default('0')) == '0'),
+          'detail': 'suspend=' ~ (poller.results[0].resources[0].spec.suspend | default(false)) ~
+                    ' unhealthy_count=' ~ (poller.results[1].resources[0].data.unhealthy_count | default('?'))
+        }] }}"
+
+    - name: Read existing PipelineRuns
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: tekton.dev/v1
+        kind: PipelineRun
+        namespace: "{{ ns }}"
+      register: prs
+
+    - name: Check the PipelineRun list is clean (so the new run is unmistakable)
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'no stale PipelineRuns on screen',
+          'ok': (prs.resources | length) == 0,
+          'detail': (prs.resources | length | string) ~ ' existing run(s)' ~
+                    ('  → oc delete pipelinerun -n ' ~ ns ~ ' --all' if (prs.resources | length) > 0 else '')
+        }] }}"
+
+    # ── the active site is actually serving right now ───────────────────────
+    - name: Read the Cloudflare hostname
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: ConfigMap
+        name: cloudflare-lb-ids
+        namespace: "{{ ns }}"
+      register: cfids
+
+    - name: Probe the public endpoint
+      ansible.builtin.uri:
+        url: "https://{{ cfids.resources[0].data.hostname }}/web/health"
+        method: GET
+        status_code: [200, 502, 503, 521]
+        validate_certs: false
+      register: probe
+      failed_when: false
+
+    - name: Check the application is serving before we break it
+      ansible.builtin.set_fact:
+        checks: "{{ checks + [{
+          'name': 'application serving at the public hostname',
+          'ok': (probe.status | default(0)) == 200,
+          'detail': 'https://' ~ (cfids.resources[0].data.hostname | default('?')) ~ '/web/health → ' ~ (probe.status | default('unreachable'))
+        }] }}"
+
+    # ── report ──────────────────────────────────────────────────────────────
+    - name: Readiness report
+      ansible.builtin.debug:
+        msg: "{{ ['════════════ PRE-DEMO READINESS ════════════'] +
+                 (checks | map(attribute='name') | zip(checks | map(attribute='ok'), checks | map(attribute='detail')) |
+                  map('join', ' :: ') | list) +
+                 ['════════════════════════════════════════════'] }}"
+
+    - name: Verdict
+      ansible.builtin.assert:
+        that:
+          - checks | rejectattr('ok') | list | length == 0
+        success_msg: >-
+          READY — gate is "{{ expect_auto_promote }}", failover mode is off, a fresh
+          snapshot exists, the poller is armed, and the app is serving.
+          Roll camera, then pull the plug.
+        fail_msg: >-
+          NOT READY — {{ checks | rejectattr('ok') | map(attribute='name') | list | join('; ') }}.
+          See the report above for the fix. Do not start the recording.
