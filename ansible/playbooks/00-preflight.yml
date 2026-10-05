@@ -1,9 +1,34 @@
 ---
-# Preflight — fail fast if the hub is missing a prerequisite.
+# Preflight — fail fast if a cluster is missing a prerequisite.
 #
-# The most common "nothing happened" failure is deploying the ApplicationSets
-# to a hub that has ACM but NOT OpenShift GitOps. Argo CD never picks them up
-# and the pattern silently does nothing. This play catches that up front.
+# Two plays:
+#
+#   1. The hub: OpenShift GitOps and ACM are present and running. Without
+#      GitOps the ApplicationSets deploy nothing, silently.
+#
+#   2. Both clusters (the van_sites group, reached directly with their own
+#      kubeconfigs): the things that cost a morning on 5 Oct 2026 —
+#        * the API answers (an expired 24h token looks like a broken cluster)
+#        * a default StorageClass exists
+#        * a default VolumeSnapshotClass exists FOR THAT StorageClass's driver.
+#          The VolSync manifests inherit both from the cluster; without the
+#          snapshot class, VolSync fails quietly and dr-restore-filestore has
+#          nothing to restore at failover
+#        * no kubelet certificate requests are stuck Pending. A pending
+#          kubelet-serving CSR leaves pods running and the API healthy but
+#          breaks every `oc exec`, `oc logs` and `tkn ... logs` — on a fresh
+#          demo-catalog hub there were thirteen of them, three hours old
+#        * enough pod headroom for the pattern (~30 pods on the passive)
+#
+# With preflight_fix=true (the default) it repairs the two unambiguous cases
+# itself: it approves kubelet CSRs submitted by this cluster's OWN nodes, and
+# marks a snapshot class default when exactly one matches the default
+# StorageClass. Anything else it reports and fails on. To only report:
+#
+#   ansible-playbook playbooks/00-preflight.yml -e preflight_fix=false
+#
+# Needs `oc` on the machine running Ansible (for CSR approval).
+
 - name: Preflight checks on the hub
   hosts: hub
   gather_facts: false
@@ -28,7 +53,7 @@
       ansible.builtin.assert:
         that:
           - >-
-            (subs.resources | selectattr('metadata.name','search','gitops') | list | length > 0)
+            (subs.resources | selectattr('spec.name', 'equalto', 'openshift-gitops-operator') | list | length > 0)
             or (gitops_ns.resources | length > 0)
         fail_msg: >-
           OpenShift GitOps (Argo CD) is not installed on this hub. ACM does not
@@ -50,6 +75,256 @@
           - mch.resources | length > 0
           - mch.resources[0].status.phase | default('') == 'Running'
         fail_msg: >-
-          No Running MultiClusterHub found. Install/So finish ACM on this hub
+          No Running MultiClusterHub found. Install or finish ACM on this hub
           first (playbooks/01-hub-operators.yml).
         success_msg: "ACM MultiClusterHub is Running."
+
+# ─────────────────────────────────────────────────────────────────────────────
+- name: Preflight checks on both clusters
+  hosts: van_sites
+  gather_facts: false
+  vars:
+    preflight_fix: true
+    min_free_pods: 40
+    checks: []
+
+  tasks:
+    # ── Reachability ─────────────────────────────────────────────────────────
+    - name: Read the nodes (proves the kubeconfig and token work)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Node
+      register: nodes
+      ignore_errors: true
+
+    - name: Stop here if the cluster cannot be reached
+      ansible.builtin.assert:
+        that: nodes is succeeded
+        fail_msg: >-
+          Cannot reach {{ inventory_hostname }} with {{ kubeconfig }}. The most
+          common cause is an expired oc login token (they last 24 hours):
+          oc login again, then rewrite the file as a single-context kubeconfig
+          (oc config view --minify --flatten > {{ kubeconfig }}).
+
+    - name: Node facts
+      ansible.builtin.set_fact:
+        node_names: "{{ nodes.resources | map(attribute='metadata.name') | list }}"
+        nodes_not_ready: >-
+          {{ nodes.resources | rejectattr('status.conditions', 'undefined')
+             | map(attribute='status.conditions') | map('selectattr', 'type', 'equalto', 'Ready')
+             | map('selectattr', 'status', 'equalto', 'True') | map('list') | map('length')
+             | select('equalto', 0) | list | length }}
+        pod_capacity: "{{ nodes.resources | map(attribute='status.capacity.pods') | map('int') | sum }}"
+
+    - name: Record node readiness
+      ansible.builtin.set_fact:
+        checks: >-
+          {{ checks + [{'name': 'nodes Ready',
+                        'status': 'PASS' if nodes_not_ready | int == 0 else 'FAIL',
+                        'detail': (node_names | length) ~ ' node(s), ' ~ nodes_not_ready ~ ' not Ready'}] }}
+
+    # ── Storage: default StorageClass + matching default VolumeSnapshotClass ─
+    - name: Read StorageClasses
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: storage.k8s.io/v1
+        kind: StorageClass
+      register: scs
+
+    - name: Find the default StorageClass
+      ansible.builtin.set_fact:
+        default_scs: "{{ (default_scs | default([])) + [item] }}"
+      loop: "{{ scs.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        (item.metadata.annotations | default({}))['storageclass.kubernetes.io/is-default-class'] | default('') == 'true'
+
+    - name: Record the StorageClass check
+      ansible.builtin.set_fact:
+        default_scs: "{{ default_scs | default([]) }}"
+        checks: >-
+          {{ checks + [{'name': 'default StorageClass',
+                        'status': ('FAIL' if (default_scs | default([])) | length == 0
+                                   else ('WARN' if (default_scs | default([])) | length > 1 else 'PASS')),
+                        'detail': ('none — mark one: oc annotate storageclass <name> storageclass.kubernetes.io/is-default-class=true'
+                                   if (default_scs | default([])) | length == 0
+                                   else ((default_scs | default([])) | map(attribute='metadata.name') | join(', ')) ~
+                                        ((' — more than one default; Kubernetes picks the newest') if (default_scs | default([])) | length > 1 else ''))}] }}
+
+    - name: Read VolumeSnapshotClasses
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotClass
+      register: vscs
+      when: default_scs | length > 0
+
+    - name: Snapshot classes for the default StorageClass's driver
+      ansible.builtin.set_fact:
+        sc_driver: "{{ default_scs[0].provisioner }}"
+        driver_vscs: "{{ vscs.resources | selectattr('driver', 'equalto', default_scs[0].provisioner) | list }}"
+      when: default_scs | length > 0
+
+    - name: Find which of them is marked default
+      ansible.builtin.set_fact:
+        default_vscs: "{{ (default_vscs | default([])) + [item] }}"
+      loop: "{{ driver_vscs | default([]) }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: >-
+        (item.metadata.annotations | default({}))['snapshot.storage.kubernetes.io/is-default-class'] | default('') == 'true'
+
+    # The one safe repair: no default, and exactly one candidate to choose.
+    - name: Mark the only matching snapshot class as default
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: snapshot.storage.k8s.io/v1
+        kind: VolumeSnapshotClass
+        name: "{{ driver_vscs[0].metadata.name }}"
+        definition:
+          metadata:
+            annotations:
+              snapshot.storage.kubernetes.io/is-default-class: "true"
+      register: vsc_fixed
+      when:
+        - preflight_fix | bool
+        - default_scs | length > 0
+        - (default_vscs | default([])) | length == 0
+        - (driver_vscs | default([])) | length == 1
+
+    - name: Record the VolumeSnapshotClass check
+      ansible.builtin.set_fact:
+        checks: >-
+          {{ checks + [{'name': 'default VolumeSnapshotClass',
+                        'status': ('FAIL' if default_scs | length == 0
+                                   else ('PASS' if (default_vscs | default([])) | length > 0
+                                   else ('FIXED' if vsc_fixed is changed
+                                   else 'FAIL'))),
+                        'detail': ('skipped — no default StorageClass' if default_scs | length == 0
+                                   else ((default_vscs | map(attribute='metadata.name') | join(', ')) ~ ' (driver ' ~ sc_driver ~ ')'
+                                         if (default_vscs | default([])) | length > 0
+                                   else ('marked ' ~ driver_vscs[0].metadata.name ~ ' default (driver ' ~ sc_driver ~ ')'
+                                         if vsc_fixed is changed
+                                   else ('no snapshot class for driver ' ~ sc_driver ~ ' — VolSync cannot snapshot. Install one for this CSI driver.'
+                                         if (driver_vscs | default([])) | length == 0
+                                   else 'none marked default; choose one of ' ~ (driver_vscs | map(attribute='metadata.name') | join(', ')) ~
+                                        ': oc annotate volumesnapshotclass <name> snapshot.storage.kubernetes.io/is-default-class=true'))))}] }}
+
+    # ── Kubelet certificate requests ─────────────────────────────────────────
+    - name: Read certificate signing requests
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: certificates.k8s.io/v1
+        kind: CertificateSigningRequest
+      register: csrs
+
+    - name: Sort pending requests into this cluster's own kubelets and everything else
+      ansible.builtin.set_fact:
+        pending_csrs: "{{ csrs.resources | rejectattr('status.conditions', 'defined') | list }}"
+        own_node_users: "{{ node_names | map('regex_replace', '^', 'system:node:') | list }}"
+
+    - name: Pick out the requests that are safe to approve
+      ansible.builtin.set_fact:
+        own_csrs: >-
+          {{ pending_csrs
+             | selectattr('spec.signerName', 'in', ['kubernetes.io/kubelet-serving', 'kubernetes.io/kube-apiserver-client-kubelet'])
+             | selectattr('spec.username', 'in', own_node_users)
+             | map(attribute='metadata.name') | list }}
+
+    - name: Approve kubelet CSRs from this cluster's own nodes
+      ansible.builtin.command:
+        argv: "{{ ['oc', '--kubeconfig', kubeconfig | expanduser, 'adm', 'certificate', 'approve'] + own_csrs }}"
+      register: csr_approved
+      changed_when: true
+      when: preflight_fix | bool and own_csrs | length > 0
+
+    # Approving a client cert usually triggers a serving-cert request right
+    # behind it. One more pass catches it.
+    - name: Give the kubelet a moment to file its follow-up request
+      ansible.builtin.pause:
+        seconds: 20
+      when: csr_approved is changed
+
+    - name: Re-read certificate signing requests
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: certificates.k8s.io/v1
+        kind: CertificateSigningRequest
+      register: csrs2
+      when: csr_approved is changed
+
+    - name: Approve any follow-up requests
+      ansible.builtin.command:
+        argv: >-
+          {{ ['oc', '--kubeconfig', kubeconfig | expanduser, 'adm', 'certificate', 'approve'] +
+             (csrs2.resources | rejectattr('status.conditions', 'defined')
+              | selectattr('spec.signerName', 'in', ['kubernetes.io/kubelet-serving', 'kubernetes.io/kube-apiserver-client-kubelet'])
+              | selectattr('spec.username', 'in', own_node_users)
+              | map(attribute='metadata.name') | list) }}
+      changed_when: true
+      when:
+        - csr_approved is changed
+        - >-
+          csrs2.resources | rejectattr('status.conditions', 'defined')
+          | selectattr('spec.signerName', 'in', ['kubernetes.io/kubelet-serving', 'kubernetes.io/kube-apiserver-client-kubelet'])
+          | selectattr('spec.username', 'in', own_node_users) | list | length > 0
+
+    - name: Record the CSR check
+      ansible.builtin.set_fact:
+        other_pending: "{{ pending_csrs | map(attribute='metadata.name') | reject('in', own_csrs) | list }}"
+        checks: >-
+          {{ checks + [{'name': 'kubelet certificate requests',
+                        'status': ('PASS' if own_csrs | length == 0
+                                   else ('FIXED' if csr_approved is changed else 'FAIL')),
+                        'detail': ('none pending' if own_csrs | length == 0
+                                   else ('approved ' ~ (own_csrs | length) ~ " from this cluster's own nodes"
+                                         if csr_approved is changed
+                                   else (own_csrs | length) ~ ' pending — exec/logs will fail until approved: oc adm certificate approve ' ~ (own_csrs | join(' '))))}] }}
+
+    - name: Record any other pending requests (never auto-approved)
+      ansible.builtin.set_fact:
+        checks: >-
+          {{ checks + [{'name': 'other pending CSRs',
+                        'status': 'WARN',
+                        'detail': (other_pending | length) ~ " left alone (not this cluster's kubelets): " ~ (other_pending | join(', '))}] }}
+      when: other_pending | length > 0
+
+    # ── Pod headroom ─────────────────────────────────────────────────────────
+    - name: Count pods that occupy a slot (not Succeeded/Failed)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: Pod
+        field_selectors:
+          - status.phase!=Succeeded
+          - status.phase!=Failed
+      register: live_pods
+
+    - name: Record pod headroom
+      ansible.builtin.set_fact:
+        checks: >-
+          {{ checks + [{'name': 'pod headroom',
+                        'status': 'PASS' if (pod_capacity | int - live_pods.resources | length) >= min_free_pods | int else 'FAIL',
+                        'detail': (live_pods.resources | length) ~ ' running of ' ~ pod_capacity ~ ' (' ~
+                                  (pod_capacity | int - live_pods.resources | length) ~ ' free; the pattern needs ~30 on the passive)' ~
+                                  ('' if (pod_capacity | int - live_pods.resources | length) >= min_free_pods | int
+                                   else ". See docs/DEMO-TOPOLOGY.md, section: The single-node hub's pod budget.")}] }}
+
+    # ── Report ───────────────────────────────────────────────────────────────
+    - name: Preflight report
+      ansible.builtin.debug:
+        msg: >-
+          {{ ['════════════ PREFLIGHT — ' ~ inventory_hostname ~ ' ════════════'] +
+             (checks | map(attribute='status')
+                     | zip(checks | map(attribute='name'), checks | map(attribute='detail'))
+                     | map('join', ' :: ') | list) }}
+
+    - name: Verdict
+      ansible.builtin.assert:
+        that: checks | selectattr('status', 'equalto', 'FAIL') | list | length == 0
+        fail_msg: >-
+          {{ inventory_hostname }} is not ready:
+          {{ checks | selectattr('status', 'equalto', 'FAIL') | map(attribute='name') | join(', ') }}.
+          Each failing line in the report above says how to fix it.
+        success_msg: "{{ inventory_hostname }} — ready."

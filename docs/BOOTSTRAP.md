@@ -148,7 +148,11 @@ oc get multiclusterhub -n open-cluster-management -w   # wait for Running, 5-10 
 
 ### 1.2 Import and label the managed clusters
 
-Import both through the ACM console (**Infrastructure → Clusters → Import cluster**), then:
+`ansible/playbooks/02-import-active.yml` does this whole step: it imports the
+active cluster (removing a stale registration to an old hub first, if there is
+one), labels the hub's `local-cluster` as the passive, and waits until both
+report Available. By hand, import through the ACM console
+(**Infrastructure → Clusters → Import cluster**), then:
 
 ```bash
 oc label managedcluster <cluster-a> cluster.open-cluster-management.io/clusterset=odoo-dr

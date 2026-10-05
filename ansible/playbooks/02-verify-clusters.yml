@@ -1,7 +1,7 @@
 ---
-# Cluster import is done through the ACM console. This play just confirms, from
-# the hub, that ACM sees both managed clusters, that they are labeled correctly
-# for the placements, and that they are Ready.
+# Confirms, from the hub, that ACM sees both managed clusters, that they are
+# labeled correctly for the placements, and that they are Ready. The import
+# itself is 02-import-active.yml (or the ACM console, if you prefer).
 - name: Verify managed clusters are ready and labeled
   hosts: hub
   gather_facts: false
@@ -30,7 +30,7 @@
           - item.resources[0].metadata.labels['role'] in ['active','passive']
         fail_msg: >-
           {{ item.item }} is not Ready or is missing role / clusterset labels.
-          Fix in the ACM console before deploying.
+          Run playbooks/02-import-active.yml (it imports and labels), then re-run.
         success_msg: "{{ item.item }} — Ready, clusterset={{ clusterset_name }}, role={{ item.resources[0].metadata.labels['role'] }}"
       loop: "{{ mc.results }}"
       loop_control:

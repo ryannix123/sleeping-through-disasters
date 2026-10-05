@@ -16,6 +16,10 @@
 #     Argo-managed one, so a re-run never fights GitOps and a spent grant is
 #     simply replaced.
 #   * Every wait has a bounded retry, and a failure names the object to check.
+#   * The Skupper controller on the active site wedges after a reboot (its
+#     Site never goes Ready, or its grant server never issues). When either
+#     wait runs out, the play restarts the controller once and waits again
+#     (skupper_restart_controller.yml) before failing.
 
 # ─────────────────────────────────────────────────────────────────────────────
 - name: Check whether the VAN link already exists
@@ -54,6 +58,9 @@
       ansible.builtin.meta: end_play
       when: not hostvars['passive_site'].link_needed | bool
 
+    # Give the Site two minutes on its own. If it is not Ready by then, the
+    # controller has almost certainly wedged (it has, every time): restart it
+    # once and wait again before failing.
     - name: Wait for the active Site to be Ready
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
@@ -61,11 +68,69 @@
         kind: Site
         namespace: "{{ skupper_namespace }}"
       register: active_site_obj
-      retries: 20
+      retries: 12
       delay: 10
       until: >-
         active_site_obj.resources | length > 0 and
         (active_site_obj.resources[0].status.status | default('')) == 'Ready'
+      failed_when: false
+
+    - name: Restart the Skupper controller if the Site never came Ready
+      ansible.builtin.include_tasks: skupper_restart_controller.yml
+      when: >-
+        not (active_site_obj.resources | length > 0 and
+             (active_site_obj.resources[0].status.status | default('')) == 'Ready')
+
+    - name: Wait for the active Site to be Ready (after the restart)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ skupper_namespace }}"
+      register: active_site_retry
+      retries: 18
+      delay: 10
+      until: >-
+        active_site_retry.resources | length > 0 and
+        (active_site_retry.resources[0].status.status | default('')) == 'Ready'
+      failed_when: false
+      when: >-
+        not (active_site_obj.resources | length > 0 and
+             (active_site_obj.resources[0].status.status | default('')) == 'Ready')
+
+    - name: Settle on the latest Site reading
+      ansible.builtin.set_fact:
+        active_site_final: >-
+          {{ active_site_retry if (active_site_retry is defined and active_site_retry is not skipped)
+             else active_site_obj }}
+
+    - name: Fail with a useful message if the Site never came Ready
+      ansible.builtin.assert:
+        that:
+          - active_site_final.resources | length > 0
+          - (active_site_final.resources[0].status.status | default('')) == 'Ready'
+        fail_msg: >-
+          The active Site in {{ skupper_namespace }} is not Ready, even after
+          restarting the Skupper controller. Check:
+          oc get site.skupper.io -n {{ skupper_namespace }} -o yaml;
+          oc logs -n openshift-operators deploy/skupper-controller --tail=50.
+
+    # A wedged controller also under-reports the network. If, once healthy,
+    # the active Site already sees both sites, the link was fine all along —
+    # do not tear it down and redo the handshake.
+    - name: Stop if the link turns out to be up already
+      ansible.builtin.set_fact:
+        link_now_up: >-
+          {{ (active_site_final.resources[0].status.sitesInNetwork | default(0) | int) >= 2 }}
+
+    - name: Report a link that was up all along
+      ansible.builtin.debug:
+        msg: "Active Site sees {{ active_site_final.resources[0].status.sitesInNetwork }} sites — the VAN is already linked. Skipping the handshake."
+      when: link_now_up | bool
+
+    - name: End the handshake here
+      ansible.builtin.meta: end_play
+      when: link_now_up | bool
 
     # Replace any previous grant of ours so a re-run never hits a spent one.
     - name: Remove a previous grant from an earlier run
@@ -114,23 +179,57 @@
         (grant.resources[0].status.ca | default('')) | length > 0
       failed_when: false
 
+    # Same wedge, other symptom: the grant server never fills in the URL.
+    - name: Restart the Skupper controller if the grant is stuck
+      ansible.builtin.include_tasks: skupper_restart_controller.yml
+      when: >-
+        not (grant.resources | length > 0 and
+             (grant.resources[0].status.url | default('')) | length > 0)
+
+    - name: Wait for the grant again (after the restart)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: AccessGrant
+        name: odoo-link-grant
+        namespace: "{{ skupper_namespace }}"
+      register: grant_retry
+      retries: 18
+      delay: 10
+      until: >-
+        grant_retry.resources | length > 0 and
+        (grant_retry.resources[0].status.status | default('')) == 'Ready' and
+        (grant_retry.resources[0].status.url | default('')) | length > 0 and
+        (grant_retry.resources[0].status.code | default('')) | length > 0 and
+        (grant_retry.resources[0].status.ca | default('')) | length > 0
+      failed_when: false
+      when: >-
+        not (grant.resources | length > 0 and
+             (grant.resources[0].status.url | default('')) | length > 0)
+
+    - name: Settle on the latest grant reading
+      ansible.builtin.set_fact:
+        grant_final: >-
+          {{ grant_retry if (grant_retry is defined and grant_retry is not skipped) else grant }}
+
     - name: Fail with a useful message if the grant never became Ready
       ansible.builtin.assert:
         that:
-          - grant.resources | length > 0
-          - (grant.resources[0].status.url | default('')) | length > 0
+          - grant_final.resources | length > 0
+          - (grant_final.resources[0].status.url | default('')) | length > 0
         fail_msg: >-
           AccessGrant odoo-link-grant on the active site did not become Ready
-          with a URL within 3 minutes. The Skupper grant server on that cluster
-          is not issuing. Check: oc get accessgrant -n {{ skupper_namespace }};
-          oc get pods -n openshift-operators | grep skupper. Restarting the
-          skupper-controller pod usually clears it, then re-run this playbook.
+          with a URL, even after restarting the Skupper controller. The grant
+          server on that cluster is not issuing. Check:
+          oc get accessgrant -n {{ skupper_namespace }};
+          oc get pods -n openshift-operators | grep skupper;
+          oc logs -n openshift-operators deploy/skupper-controller --tail=50.
 
     - name: Stash the grant for the passive site
       ansible.builtin.set_fact:
-        grant_url: "{{ grant.resources[0].status.url }}"
-        grant_code: "{{ grant.resources[0].status.code }}"
-        grant_ca: "{{ grant.resources[0].status.ca }}"
+        grant_url: "{{ grant_final.resources[0].status.url }}"
+        grant_code: "{{ grant_final.resources[0].status.code }}"
+        grant_ca: "{{ grant_final.resources[0].status.ca }}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 - name: Redeem the grant on the passive site
@@ -139,7 +238,9 @@
   tasks:
     - name: Skip if the link already exists
       ansible.builtin.meta: end_play
-      when: not link_needed | bool
+      when: >-
+        not link_needed | bool or
+        hostvars['active_site'].link_now_up | default(false) | bool
 
     - name: Remove a stale token/link from an earlier run
       kubernetes.core.k8s:

@@ -49,16 +49,19 @@ Two machines. Three logical roles.
 
 This is the one placement decision that is not negotiable.
 
-Phase 2 of failover — promoting the standby and scaling Odoo up — happens by
-committing to Git and letting Argo CD reconcile. If the hub were co-located
-with the **active** site, killing the active region would kill ACM and Argo CD
-along with the workload, and that mechanism would be gone at exactly the moment
-it is needed. You would be reduced to running `oc patch` by hand on the
-surviving cluster, live, having just told the audience the pattern is
-GitOps-driven.
+If the hub were co-located with the **active** site, killing the active region
+would kill ACM and Argo CD along with the workload — the management plane would
+be gone at exactly the moment it is needed.
+
+There is also a concrete dependency in the code. The failover pipeline runs on
+the passive cluster, and its first task, `dr-suspend-gitops`, freezes the
+ApplicationSets so Argo cannot revert the promotion. It does that with plain
+in-cluster `oc patch -n openshift-gitops` — which only works because the hub's
+Argo CD lives on the same cluster as the pipeline. Move the hub anywhere else
+and the pipeline cannot reach the thing it must freeze first.
 
 With the hub on the passive side, the management plane survives the outage it
-is meant to respond to.
+is meant to respond to, and the failover can freeze it locally.
 
 In production the hub is independent of both sites. Here it rides along with
 the DR site so that it survives — and that is worth saying out loud rather than
@@ -215,8 +218,32 @@ change rather than an addition. Verify it took before deploying:
 oc get managedclusters -L role,cluster.open-cluster-management.io/clusterset
 ```
 
-In the Ansible inventory, the `hub` and `passive` hosts point at the same
-kubeconfig, and `managed_cluster_name` for the passive host is `local-cluster`.
+`ansible/playbooks/02-import-active.yml` applies these labels for you (and
+imports the active cluster). In the inventory, `passive_cluster_name` is
+`local-cluster`, and the `passive_site` host uses the hub's own kubeconfig.
+
+If `local-cluster` is missing from `oc get managedclusters`, the hub was set up
+with self-management turned off (`disableHubSelfManagement: true` on the
+MultiClusterHub). It cannot be the passive site that way; turn it back on.
+
+## Using a demo-catalog ACM cluster as the hub
+
+Building the hub from a catalog item that ships ACM preinstalled (as on
+5 Oct 2026) saves the ACM install, but the cluster arrives with its own
+assumptions. What to expect, and what the automation now does about each:
+
+| What you will find | What to do |
+|---|---|
+| ACM is already installed, with its own OperatorGroup and Subscription | Nothing. `01-hub-operators.yml` detects it and leaves it alone. (An earlier version created a second OperatorGroup and re-pointed the Subscription at an old channel; OLM put ACM in Failed until the duplicate was deleted.) |
+| "Ready" in the catalog well before the console answers | Check with `oc`, not the browser. The console took 5–10 minutes longer than the API — long enough that the first hub of that morning was deleted as broken when it was only slow. |
+| Thirteen `kubelet-serving` CSRs Pending since provisioning | `00-preflight.yml` approves them. Until it does, pods run and the API is healthy, but `oc exec`, `oc logs` and `tkn … logs` all fail — which is how `98-diagnose` found them. |
+| ODF external storage with **no default VolumeSnapshotClass** | `00-preflight.yml` marks the RBD snapshot class default (the one matching the default StorageClass's driver). Without it, VolSync's destination snapshots fail quietly. |
+| Node pod limit raised to **500** | Nothing — but check rather than assume; preflight reports real headroom. The 250-pod section below applies to a hub you build yourself. |
+| A retirement date set by the catalog | Push it past the demo the day you order. The AWS hub from September disappeared this way. |
+
+The pattern's own manifests needed no changes for this hub — everything in
+`clusters/`, `applicationsets/` and `hub/` deployed unchanged. Every problem
+was in the cluster's starting state, which is what preflight now checks.
 
 ## Growing out of it
 
@@ -227,7 +254,8 @@ anti-affinity, and the RPO ~0 claim come back with no other change.
 
 ## The single-node hub's pod budget
 
-A SNO hub is capped at **250 pods**. ACM + MCE + ODF alone consume ~95, and
+A SNO hub you install yourself is capped at **250 pods** (catalog images may
+raise it — `oc get node -o jsonpath='{.items[0].status.capacity.pods}'`). ACM + MCE + ODF alone consume ~95, and
 installing OpenShift Pipelines (full profile) adds ~13. The first failover
 test hit `0/1 nodes are available: Too many pods` — the pipeline could not
 even schedule. What helped, in order of cost:

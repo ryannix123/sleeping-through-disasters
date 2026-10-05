@@ -103,6 +103,9 @@ sleeping-through-disasters/
 │
 ├── ansible/                  Build-time and day-two automation
 │   └── playbooks/
+│       ├── 01-hub-operators.yml       GitOps + ACM — installs only what is missing
+│       ├── 02-import-active.yml       Imports the active cluster into ACM, labels both
+│       ├── 00-preflight.yml           Both clusters: storage defaults, kubelet CSRs, pod headroom
 │       ├── 00-predemo-check.yml       Read-only readiness check → READY / NOT READY
 │       ├── 98-diagnose.yml            Full DB + filestore + VAN diagnosis, both sites
 │       └── 97-reset-after-failover.yml  Return to steady state after a failover
@@ -123,7 +126,8 @@ sleeping-through-disasters/
 
 ## How it works
 
-Cluster **labels** drive everything:
+Cluster **labels** drive everything. `ansible/playbooks/02-import-active.yml`
+imports the active cluster and applies them; by hand they are:
 
 ```bash
 oc label managedcluster <cluster-a> cluster.open-cluster-management.io/clusterset=odoo-dr
@@ -157,16 +161,19 @@ and the pattern is inert without Argo CD on the hub.
 | Advanced Cluster Management | The control plane — placements, policies, cluster fleet | you / the demo platform |
 | **OpenShift GitOps (Argo CD)** | **Reconciles the ApplicationSets to both clusters — without it, nothing deploys** | `ansible/playbooks/01-hub-operators.yml`, or install by hand |
 
-The Ansible layer's `01-hub-operators.yml` installs GitOps (and ACM) idempotently,
-so running that play covers you. If you deploy by hand, install the **Red Hat
-OpenShift GitOps** operator from OperatorHub on the hub first.
+The Ansible layer's `01-hub-operators.yml` installs whichever of the two is
+missing and leaves an existing installation alone, so it is safe on a hub that
+arrives with ACM already running. With no channel pinned it installs the
+release the cluster's catalog marks as current. If you deploy by hand, install
+the **Red Hat OpenShift GitOps** operator from OperatorHub on the hub first.
 
 Everything else — CloudNativePG, VolSync, Service Interconnect, OpenShift
 Pipelines, OADP — is installed onto the managed clusters by GitOps from
 `clusters/both/operators/`. You do not install those by hand.
 
 > **Single-node hubs:** ACM, GitOps, Pipelines and the workload together will
-> approach the 250-pod ceiling on an SNO. Trim the Tekton profile and the
+> approach the 250-pod ceiling on an SNO (some demo-catalog images raise the
+> limit to 500 — `00-preflight.yml` reports the real headroom). Trim the Tekton profile and the
 > optional MCE/ACM components rather than disabling `app-lifecycle` — that one
 > runs the GitOpsCluster integration, and turning it off silently severs Argo's
 > credentials to the managed clusters.
@@ -203,11 +210,16 @@ Full walkthrough either way, including the three secrets that are deliberately
 **[docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)**. The automation boundary — what
 Ansible owns versus what Argo CD owns — is in **[ansible/README.md](ansible/README.md)**.
 
-Before you demo it, run the readiness check. It is read-only and ends in one word:
+Before you demo it, run the readiness check. It is read-only and ends in one
+word. Tell it which demo you are giving:
 
 ```bash
-ansible-playbook playbooks/00-predemo-check.yml    # → READY / NOT READY
+ansible-playbook playbooks/00-predemo-check.yml                              # live or recorded failover
+ansible-playbook playbooks/00-predemo-check.yml -e expect_auto_promote=false  # steady state only
 ```
+
+For a steady-state demo, the gate *should* be off: a network blip mid-talk then
+waits for a human instead of promoting the passive site in front of the room.
 
 ## Failover
 
@@ -284,7 +296,8 @@ it has been earned.
 
 | Playbook | What it does |
 |---|---|
-| `00-predemo-check.yml` | Seven read-only checks, ending in READY or NOT READY. Trust it — an all-red result means all-red. |
+| `00-preflight.yml` | Before deploying: storage defaults, stuck kubelet CSRs and pod headroom on both clusters — fixing the unambiguous ones itself |
+| `00-predemo-check.yml` | Seven read-only checks, ending in READY or NOT READY. Trust it — an all-red result means all-red. Add `-e expect_auto_promote=false` for a steady-state demo. |
 | `98-diagnose.yml` | Writes a probe row on the active primary and confirms it arrives on the passive; reports row counts, filestore file counts on both sides, VolSync sync times, VAN link state and PVC binding. One command, full picture. |
 | `99-verify.yml` | ACM policy compliance and CNPG cluster health from the hub |
 | `97-reset-after-failover.yml` | Return to steady state |

@@ -1,11 +1,114 @@
 ---
-# Phase 1.1 — install OpenShift GitOps and ACM on the hub, then create the
-# MultiClusterHub and wait for it to come up.
+# Phase 1.1 — make sure the hub has OpenShift GitOps and ACM, without ever
+# fighting an installation that is already there.
+#
+# A hub can arrive three ways: bare (install everything), with ACM already
+# installed by a demo catalog or a platform team (leave it alone), or fully
+# set up from an earlier run (nothing to do). Each operator is detected
+# first and installed only if it is missing.
+#
+# Why the care (5 Oct 2026): on a catalog-provisioned ACM hub, an earlier
+# version of this play created a SECOND OperatorGroup in
+# open-cluster-management and re-pointed the catalog's Subscription at an
+# old channel. OLM refuses to install anything in a namespace with two
+# OperatorGroups, so the ACM CSV went Failed, and the play waited on it
+# forever. The fix is simple: never create what already exists.
+#
+# Channels: leave acm_channel / gitops_channel empty (the default) to install
+# whatever the cluster's catalog marks as current. The redhat-operators
+# catalog is built per OpenShift minor version, so its default channel is
+# always one supported on this cluster. Set a channel only to pin
+# deliberately. The channel actually used is printed at the end.
+
 - name: Hub foundation
   hosts: hub
   gather_facts: false
 
+  vars:
+    acm_namespace: open-cluster-management
+
   tasks:
+    # ── What is already here? ────────────────────────────────────────────────
+    - name: Read every operator Subscription on the hub
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1alpha1
+        kind: Subscription
+      register: all_subs
+
+    - name: Look for an existing MultiClusterHub (any namespace)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operator.open-cluster-management.io/v1
+        kind: MultiClusterHub
+      register: existing_mch
+      failed_when: false          # CRD absent on a bare hub — that is the answer
+
+    - name: Decide what needs installing
+      ansible.builtin.set_fact:
+        gitops_sub: >-
+          {{ all_subs.resources | selectattr('spec.name', 'equalto', 'openshift-gitops-operator') | list | first | default({}) }}
+        acm_sub: >-
+          {{ all_subs.resources | selectattr('spec.name', 'equalto', 'advanced-cluster-management') | list | first | default({}) }}
+        mch_found: "{{ (existing_mch.resources | default([])) | length > 0 }}"
+
+    - name: Settle the plan
+      ansible.builtin.set_fact:
+        install_gitops: "{{ gitops_sub | length == 0 }}"
+        install_acm: "{{ acm_sub | length == 0 and not (mch_found | bool) }}"
+        acm_ns: >-
+          {{ (existing_mch.resources[0].metadata.namespace if (mch_found | bool)
+              else (acm_sub.metadata.namespace if acm_sub | length > 0 else acm_namespace)) }}
+
+    - name: Report what was found
+      ansible.builtin.debug:
+        msg:
+          - "OpenShift GitOps : {{ 'not installed — will install' if install_gitops else 'already subscribed (' ~ gitops_sub.metadata.namespace ~ '/' ~ gitops_sub.metadata.name ~ ', channel ' ~ gitops_sub.spec.channel | default('default') ~ ') — leaving it alone' }}"
+          - "ACM              : {{ 'not installed — will install' if install_acm else 'already present in ' ~ acm_ns ~ ' — leaving it alone' }}"
+
+    # ── Resolve channels from the catalog unless pinned ──────────────────────
+    - name: Read the catalog's package for OpenShift GitOps
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: packages.operators.coreos.com/v1
+        kind: PackageManifest
+        name: openshift-gitops-operator
+        namespace: openshift-marketplace
+      register: gitops_pkg
+      when: install_gitops | bool and (gitops_channel | default('')) | length == 0
+
+    - name: Read the catalog's package for ACM
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: packages.operators.coreos.com/v1
+        kind: PackageManifest
+        name: advanced-cluster-management
+        namespace: openshift-marketplace
+      register: acm_pkg
+      when: install_acm | bool and (acm_channel | default('')) | length == 0
+
+    - name: Choose channels
+      ansible.builtin.set_fact:
+        gitops_channel_resolved: >-
+          {{ gitops_channel if (gitops_channel | default('')) | length > 0
+             else (gitops_pkg.resources[0].status.defaultChannel | default('latest')
+                   if (gitops_pkg.resources | default([])) | length > 0 else 'latest') }}
+        acm_channel_resolved: >-
+          {{ acm_channel if (acm_channel | default('')) | length > 0
+             else (acm_pkg.resources[0].status.defaultChannel | default('')
+                   if (acm_pkg.resources | default([])) | length > 0 else '') }}
+
+    - name: Fail clearly if the catalog has no ACM package
+      ansible.builtin.assert:
+        that: acm_channel_resolved | length > 0
+        fail_msg: >-
+          Could not find advanced-cluster-management in the redhat-operators
+          catalog (openshift-marketplace). Check that the catalog source is
+          healthy (oc get catalogsource -n openshift-marketplace), or set
+          acm_channel explicitly in group_vars/all/main.yml.
+      when: install_acm | bool
+
+    # ── OpenShift GitOps ─────────────────────────────────────────────────────
     - name: Subscribe to OpenShift GitOps
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -17,12 +120,14 @@
             name: openshift-gitops-operator
             namespace: openshift-operators
           spec:
-            channel: "{{ gitops_channel }}"
+            channel: "{{ gitops_channel_resolved }}"
             installPlanApproval: Automatic
             name: openshift-gitops-operator
             source: redhat-operators
             sourceNamespace: openshift-marketplace
+      when: install_gitops | bool
 
+    # ── ACM ──────────────────────────────────────────────────────────────────
     - name: Create the ACM namespace
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
@@ -31,9 +136,21 @@
           apiVersion: v1
           kind: Namespace
           metadata:
-            name: open-cluster-management
+            name: "{{ acm_ns }}"
+      when: install_acm | bool
 
-    - name: Create the ACM OperatorGroup
+    # One OperatorGroup per namespace — a second one breaks every operator in
+    # it. Only create ours if the namespace has none.
+    - name: Look for an OperatorGroup in the ACM namespace
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1
+        kind: OperatorGroup
+        namespace: "{{ acm_ns }}"
+      register: acm_og
+      when: install_acm | bool
+
+    - name: Create the ACM OperatorGroup (only if there is none)
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         state: present
@@ -42,10 +159,11 @@
           kind: OperatorGroup
           metadata:
             name: open-cluster-management
-            namespace: open-cluster-management
+            namespace: "{{ acm_ns }}"
           spec:
             targetNamespaces:
-              - open-cluster-management
+              - "{{ acm_ns }}"
+      when: install_acm | bool and acm_og.resources | length == 0
 
     - name: Subscribe to Advanced Cluster Management
       kubernetes.core.k8s:
@@ -56,26 +174,28 @@
           kind: Subscription
           metadata:
             name: advanced-cluster-management
-            namespace: open-cluster-management
+            namespace: "{{ acm_ns }}"
           spec:
-            channel: "{{ acm_channel }}"
+            channel: "{{ acm_channel_resolved }}"
             installPlanApproval: Automatic
             name: advanced-cluster-management
             source: redhat-operators
             sourceNamespace: openshift-marketplace
+      when: install_acm | bool
 
     - name: Wait for the ACM operator to be ready
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         api_version: operators.coreos.com/v1alpha1
         kind: ClusterServiceVersion
-        namespace: open-cluster-management
+        namespace: "{{ acm_ns }}"
       register: acm_csv
       retries: "{{ operator_wait_retries }}"
       delay: "{{ operator_wait_delay }}"
       until:
         - acm_csv.resources | selectattr('metadata.name', 'search', 'advanced-cluster-management')
           | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+      when: install_acm | bool
 
     - name: Create the MultiClusterHub
       kubernetes.core.k8s:
@@ -86,17 +206,49 @@
           kind: MultiClusterHub
           metadata:
             name: multiclusterhub
-            namespace: open-cluster-management
+            namespace: "{{ acm_ns }}"
           spec: {}
+      when: install_acm | bool
 
+    # Runs on every path: a pre-installed ACM must be healthy too.
     - name: Wait for the MultiClusterHub to report Running
       kubernetes.core.k8s_info:
         kubeconfig: "{{ kubeconfig }}"
         api_version: operator.open-cluster-management.io/v1
         kind: MultiClusterHub
-        name: multiclusterhub
-        namespace: open-cluster-management
+        namespace: "{{ acm_ns }}"
       register: mch
       retries: "{{ operator_wait_retries }}"
       delay: "{{ operator_wait_delay }}"
-      until: mch.resources[0].status.phase | default('') == 'Running'
+      until: >-
+        mch.resources | length > 0 and
+        mch.resources[0].status.phase | default('') == 'Running'
+
+    - name: Wait for the OpenShift GitOps operator to be ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: openshift-operators
+      register: gitops_csv
+      retries: "{{ operator_wait_retries }}"
+      delay: "{{ operator_wait_delay }}"
+      until:
+        - gitops_csv.resources | selectattr('metadata.name', 'search', 'openshift-gitops-operator')
+          | selectattr('status.phase', 'equalto', 'Succeeded') | list | length > 0
+
+    # ── Record what is actually running ──────────────────────────────────────
+    - name: Read the installed CSVs
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ acm_ns }}"
+      register: final_csvs
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "ACM    : {{ (final_csvs.resources | selectattr('metadata.name', 'search', 'advanced-cluster-management') | map(attribute='spec.version') | list | first | default('?')) }}  ({{ 'installed now from channel ' ~ acm_channel_resolved if install_acm else 'pre-existing, untouched' }})"
+          - "GitOps : {{ (final_csvs.resources | selectattr('metadata.name', 'search', 'openshift-gitops-operator') | map(attribute='spec.version') | list | first | default('?')) }}  ({{ 'installed now from channel ' ~ gitops_channel_resolved if install_gitops else 'pre-existing, untouched' }})"
+          - "MultiClusterHub: {{ mch.resources[0].status.phase }} in {{ acm_ns }}"

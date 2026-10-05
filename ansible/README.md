@@ -4,22 +4,30 @@ Build-time automation for the parts of this pattern that GitOps cannot own.
 
 ## What this does and does not do
 
-This is **setup automation, not reconciliation**, and it is **hub-only**. Every
-playbook talks to the ACM hub and nothing else — ACM and Argo CD distribute to
-the managed clusters. You never need a managed-cluster kubeconfig. That is the
-whole point of ACM as the control plane, and the automation reflects it.
+This is **setup automation, not reconciliation**, and it is **hub-first**.
+Almost every playbook talks to the ACM hub and nothing else — ACM and Argo CD
+distribute to the managed clusters. Three plays reach the managed clusters
+directly, each for a reason the hub cannot cover:
+
+| Play | Why it talks to a managed cluster directly |
+|---|---|
+| `00-preflight.yml` | Checks storage defaults, stuck kubelet CSRs and pod headroom on each cluster *before* anything is deployed onto it |
+| `02-import-active.yml` | Applies the klusterlet that joins the active cluster to the hub — by definition, before ACM can reach it |
+| `05-interconnect-link.yml` | The Skupper token handshake and the VolSync key copy |
 
 | Owned by Ansible (hub-only) | Owned by ACM + Argo CD |
 |---|---|
-| Hub operators, MultiClusterHub | Odoo, CloudNativePG, VolSync, Interconnect manifests |
+| Hub operators, MultiClusterHub (left alone if already installed) | Odoo, CloudNativePG, VolSync, Interconnect manifests |
+| Importing the active cluster, labelling both | |
 | Applying `hub/`, `applicationsets/`, `policies/` | Installing operators on both clusters |
 | Secret distribution **via an ACM Policy** | Pushing secrets to both clusters |
 | Reading cluster state **via ACM** (ManagedClusterView) | Drift correction |
 | Cloudflare load balancing | |
 | Verification (through ACM) | |
 
-Cluster import + labelling is done once in the ACM console (or `02-verify-clusters.yml`
-confirms it). Failover is a reviewed Git commit, by design — not here.
+Failover is not here either: it is OpenShift Pipelines on the passive cluster
+(`clusters/passive/failover/`), gated by the `auto_promote` key — see
+[docs/FAILOVER.md](../docs/FAILOVER.md).
 
 **How hub-only works:** secrets are distributed by an enforced ACM
 `ConfigurationPolicy` bound to the "both clusters" Placement — declared once on
@@ -35,23 +43,23 @@ cd ansible
 ansible-galaxy collection install -r requirements.yml
 ```
 
-Fill in `inventory/hosts.yml` — there is a **single host, the hub**. It uses
-your current `oc login` by default, so as long as `oc whoami --show-server`
-returns the hub API, you are set. Set `active_cluster_name` and
-`passive_cluster_name` to the names as they appear in the ACM Clusters list
-(here: `production` and `local-cluster`).
+Fill in `inventory/hosts.yml`. The `hub` host uses `~/.kube/hub.config`;
+`active_cluster_name` is the name the active cluster gets in ACM (`active`) and
+`passive_cluster_name` is the hub's own `local-cluster`.
 
-`05-interconnect-link.yml` is the one exception to hub-only: it needs a
-kubeconfig for each managed cluster (the `van_sites` group). Create them once
-with `oc login` (see the comments in `inventory/hosts.yml`). In this demo the
-passive site *is* the hub cluster, so its kubeconfig is the same login you
-already have.
+The plays that reach the managed clusters directly use the `van_sites` group:
+`~/.kube/active.config` for the active site, and the hub's kubeconfig for the
+passive site — in this topology the passive *is* the hub. Create both files
+once with `oc login`, then strip each to a single context (see the comments in
+`inventory/hosts.yml`). `oc` login tokens last 24 hours; preflight tells you
+when one has expired.
 
 Then edit `group_vars/all/main.yml` — at minimum:
 
 - `gitops_repo_url` — your fork
 - `cloudflare_hostname` — the name users will hit
-- `volsync_s3_bucket` / `volsync_s3_endpoint` / `volsync_s3_region`
+- `acm_channel` / `gitops_channel` — leave empty to install the catalog's
+  current release, or set one to pin
 
 ## Secrets
 
@@ -86,7 +94,9 @@ ansible-playbook site.yml
 Or a phase at a time — each targets the hub and is idempotent:
 
 ```bash
-ansible-playbook playbooks/01-hub-operators.yml      # GitOps + ACM + MultiClusterHub (skip if already up)
+ansible-playbook playbooks/01-hub-operators.yml      # GitOps + ACM — installs only what is missing
+ansible-playbook playbooks/02-import-active.yml      # import the active cluster, label both
+ansible-playbook playbooks/00-preflight.yml          # both clusters: storage defaults, kubelet CSRs, pod headroom
 ansible-playbook playbooks/02-verify-clusters.yml    # confirm both clusters Ready + labelled
 ansible-playbook playbooks/03-secrets.yml            # hub/ bootstrap + odoo namespace + secrets via ACM Policy
 ansible-playbook playbooks/04-deploy-gitops.yml      # applicationsets/ + policies/ — the GitOps hand-off
@@ -95,10 +105,12 @@ ansible-playbook playbooks/06-cloudflare.yml         # monitor, pools, load bala
 ansible-playbook playbooks/97-reset-after-failover.yml  # AFTER a failover test: safely restore active/passive steady state (see docs/FAILOVER.md)
 ansible-playbook playbooks/98-diagnose.yml           # cross-cluster proof: probe row, filestore counts, VAN (see docs/VALIDATION.md)
 ansible-playbook playbooks/99-verify.yml             # assertions via ACM, changes nothing
+ansible-playbook playbooks/00-predemo-check.yml      # immediately before a demo — see below
 ```
 
-Since you imported both clusters through the console, `01` can be skipped if
-GitOps and ACM are already running on the hub — start at `02`.
+`01` is safe on any hub. It detects an existing ACM or GitOps install and leaves
+it untouched, so a hub that arrives with ACM already running (a demo catalog
+cluster, a platform team's hub) needs no special handling.
 
 **Order matters: `03` before `04`.** CloudNativePG creates the `replicator`
 role from the `odoo-replicator` Secret at bootstrap. If the workloads land
@@ -115,7 +127,52 @@ The ones you will re-run:
   idempotent and skips itself if the VAN is already up
 - **`99`** any time you want to confirm the DR posture is still sound
 
+## Before a demo
+
+`00-predemo-check.yml` is read-only and ends in READY or NOT READY. It checks
+the failover gate against what *this* demo needs, so tell it which demo you
+are giving:
+
+```bash
+# Recording or running a live failover — the system must finish on its own:
+ansible-playbook playbooks/00-predemo-check.yml
+
+# Showing steady state live (failover on video, or not at all):
+ansible-playbook playbooks/00-predemo-check.yml -e expect_auto_promote=false
+```
+
+The second is the safer stage setting: with the gate off, a home-internet blip
+during the talk is detected and waits for a human instead of promoting the
+passive site in front of the audience.
+
 ## Notes on specific playbooks
+
+**`01-hub-operators.yml`** reads what is already on the hub before creating
+anything. An existing MultiClusterHub or ACM Subscription means ACM is left
+alone — no second OperatorGroup (which breaks every operator in the namespace),
+no re-pointed channel. With `acm_channel` empty it installs the channel the
+cluster's `redhat-operators` catalog marks as default, which is always a
+release supported on that OpenShift version, and prints the version it
+installed.
+
+**`00-preflight.yml`** has two plays. The hub play confirms GitOps and ACM. The
+second runs against both clusters and repairs the two unambiguous problems
+itself: it approves pending kubelet CSRs submitted by the cluster's **own**
+nodes (a stuck `kubelet-serving` CSR breaks `oc exec`, `oc logs` and
+`tkn … logs` while everything else looks healthy), and it marks a
+VolumeSnapshotClass default when exactly one matches the default StorageClass's
+driver (without one, VolSync fails quietly). Anything ambiguous it reports and
+fails on. `-e preflight_fix=false` makes it report-only. It needs `oc` on the
+machine running Ansible.
+
+**`02-import-active.yml`** does what the console's "Run import commands"
+option does: creates the `ManagedCluster` and `KlusterletAddonConfig` on the
+hub, applies the generated import manifests to the active cluster, and waits
+for it to report Available. If the active cluster's klusterlet is still
+registered to a different (usually retired) hub, it removes that registration
+first. It also labels the hub's `local-cluster` as the passive and stops with
+an explanation if hub self-management is turned off. Idempotent: an
+already-Available cluster is only re-labelled.
 
 **`04-deploy-gitops.yml`** hands off to Argo CD. On a first install expect
 failing syncs while the four operators land — the postgres, interconnect and
@@ -136,10 +193,13 @@ the source. It issues its own grant (`odoo-link-grant`) rather than consuming
 the Argo-managed one, so re-runs never fight GitOps, and it skips the
 handshake entirely if the VAN is already up — safe to re-run after a reboot.
 
-If the grant never becomes Ready, the Skupper grant server on the active site
-is not issuing (on a site without a cloud LoadBalancer its Service sits
-`<pending>` and it occasionally wedges); restarting the `skupper-controller`
-pod clears it. A token error of `404 No such access granted` means the passive
+The Skupper controller on the active site wedges after a reboot — its Site
+never goes Ready, or its grant server never issues (on a site without a cloud
+LoadBalancer its Service sits `<pending>`). Restarting the `skupper-controller`
+pod clears it, so the play now does that itself: if either wait runs out, it
+restarts the controller once (`skupper_restart_controller.yml`) and waits
+again before failing. If the healthy Site then turns out to see both sites
+already, the handshake is skipped rather than redone. A token error of `404 No such access granted` means the passive
 cluster reached the *wrong* grant server — almost always a kubeconfig pointing
 at the wrong cluster; see the single-context rule in `docs/BOOTSTRAP.md`.
 
