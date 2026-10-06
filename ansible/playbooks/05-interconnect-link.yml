@@ -19,7 +19,12 @@
 #   * The Skupper controller on the active site wedges after a reboot (its
 #     Site never goes Ready, or its grant server never issues). When either
 #     wait runs out, the play restarts the controller once and waits again
-#     (skupper_restart_controller.yml) before failing.
+#     (skupper_restart_controller.yml) before failing. That also rolls the
+#     router, which only reads its TLS certificate at start.
+#   * Before redeeming, it deletes any leftover AccessToken, Link AND link
+#     Secret on the passive. A stale Secret silently spends the new grant.
+#   * If the token redeems but the sites still don't link, it rolls the
+#     active router once (stale certificate) and waits again.
 
 # ─────────────────────────────────────────────────────────────────────────────
 - name: Check whether the VAN link already exists
@@ -242,15 +247,26 @@
         not link_needed | bool or
         hostvars['active_site'].link_now_up | default(false) | bool
 
-    - name: Remove a stale token/link from an earlier run
+    # All three share the name token-odoo-active-link. The Secret matters
+    # most: it is the link credential the redeem writes. If one survives from
+    # an earlier run, the controller keeps re-redeeming against the NEW grant,
+    # spends every redemption, and the fresh token gets 404 "No such access
+    # granted" even though the grant was just issued (2026-10-06).
+    - name: Remove a stale token, link and link Secret from an earlier run
       kubernetes.core.k8s:
         kubeconfig: "{{ kubeconfig }}"
         state: absent
-        api_version: skupper.io/v2alpha1
-        kind: "{{ item }}"
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
         name: token-odoo-active-link
         namespace: "{{ skupper_namespace }}"
-      loop: [AccessToken, Link]
+        wait: true
+      loop:
+        - {api_version: skupper.io/v2alpha1, kind: AccessToken}
+        - {api_version: skupper.io/v2alpha1, kind: Link}
+        - {api_version: v1, kind: Secret}
+      loop_control:
+        label: "{{ item.kind }}"
 
     - name: Apply the AccessToken (this is the redeem)
       kubernetes.core.k8s:
@@ -289,10 +305,14 @@
           - (token.resources[0].status.redeemed | default(false)) | bool
         fail_msg: >-
           The AccessToken was not redeemed. Skupper says:
-          "{{ token.resources[0].status.message | default('no message') }}".
-          A 404 "No such access granted" means the passive cluster reached the
-          WRONG grant server — verify each kubeconfig is a single-context file
-          pointing at the intended cluster (see docs/BOOTSTRAP.md).
+          "{{ token.resources[0].status.message | default('no message') if token.resources | length > 0 else 'token not found' }}".
+          A 404 "No such access granted" almost always means the grant ran out
+          of redemptions before this token used it — typically a leftover link
+          Secret (token-odoo-active-link) being redeemed in a loop. This play
+          now deletes that Secret first, so re-run it; check the active
+          controller log for "already redeemed" if it repeats. A wrong
+          kubeconfig is only the cause if this grant URL is NOT the active
+          cluster: {{ hostvars['active_site'].grant_url }}
 
     # The redeemed token creates the Link; the router then dials the active
     # site's inter-router endpoint. Both Sites report 2 sites when it's up.
@@ -303,15 +323,64 @@
         kind: Site
         namespace: "{{ skupper_namespace }}"
       register: site_after
-      retries: 18
+      retries: 12
       delay: 10
       until: >-
         site_after.resources | length > 0 and
         (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2
+      failed_when: false
+
+    # Redeemed but not linked: the usual cause is the active router still
+    # serving a certificate the controller has since replaced, so the passive
+    # router's TLS handshake fails ("SSL certificate verify failed") and the
+    # Link sits Not Operational. Roll the active router once, then wait again.
+    - name: Restart the active router if the link did not come up
+      ansible.builtin.include_tasks: skupper_restart_router.yml
+      vars:
+        kubeconfig: "{{ hostvars['active_site'].kubeconfig }}"
+        skupper_namespace: "{{ hostvars['active_site'].skupper_namespace }}"
+      when: >-
+        not (site_after.resources | length > 0 and
+             (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2)
+
+    - name: Wait for both sites again (after the router restart)
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ skupper_namespace }}"
+      register: site_retry
+      retries: 18
+      delay: 10
+      until: >-
+        site_retry.resources | length > 0 and
+        (site_retry.resources[0].status.sitesInNetwork | default(0) | int) >= 2
+      failed_when: false
+      when: >-
+        not (site_after.resources | length > 0 and
+             (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2)
+
+    # A skipped task overwrites its register, so pick whichever reading ran.
+    - name: Settle on the latest Site reading
+      ansible.builtin.set_fact:
+        site_final: "{{ site_retry if (site_retry is defined and site_retry is not skipped) else site_after }}"
+
+    - name: Fail with a useful message if the sites never linked
+      ansible.builtin.assert:
+        that:
+          - site_final.resources | length > 0
+          - (site_final.resources[0].status.sitesInNetwork | default(0) | int) >= 2
+        fail_msg: >-
+          The token was redeemed but the sites never linked (passive sees
+          {{ site_final.resources[0].status.sitesInNetwork | default(0) if site_final.resources | length > 0 else 0 }}
+          site(s)), even after restarting the active router. Check
+          `oc get link -n {{ skupper_namespace }}` on passive, and the passive
+          router log (`oc logs deploy/skupper-router -c router`) for TLS or
+          connection errors to the active cluster's inter-router endpoint.
 
     - name: Report link status
       ansible.builtin.debug:
-        msg: "VAN is up — passive Site sees {{ site_after.resources[0].status.sitesInNetwork }} sites. The link carries PostgreSQL and the filestore between clusters."
+        msg: "VAN is up — passive Site sees {{ site_final.resources[0].status.sitesInNetwork }} sites. The link carries PostgreSQL and the filestore between clusters."
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VolSync rsync-tls: the destination (passive) generates the pre-shared key;

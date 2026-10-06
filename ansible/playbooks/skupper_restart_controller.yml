@@ -7,8 +7,10 @@
 # its grant server never issued a grant. Restarting the controller pod cleared
 # it every time. The playbook now does that itself, once, before giving up.
 #
-# Expects: kubeconfig. Optional: skupper_controller_namespace,
-# skupper_controller_selector.
+# Afterwards it also rolls the site's router (skupper_restart_router.yml).
+#
+# Expects: kubeconfig, skupper_namespace. Optional:
+# skupper_controller_namespace, skupper_controller_selector.
 
 - name: Find the Skupper controller pod(s)
   kubernetes.core.k8s_info:
@@ -53,3 +55,9 @@
 - name: Let the new controller reconcile the Site
   ansible.builtin.pause:
     seconds: 30
+
+# A restarted controller may re-issue the site's server certificate, and the
+# router only reads it at start. Roll the router too, or the next link fails
+# with "certificate verify failed" (see skupper_restart_router.yml).
+- name: Restart the router so it picks up any re-issued certificate
+  ansible.builtin.include_tasks: skupper_restart_router.yml

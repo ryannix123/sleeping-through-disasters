@@ -11,6 +11,10 @@
 #   * Filestore: counts files in Odoo's filestore on active and in the VolSync
 #     destination volume on passive, and reports the last sync time/duration.
 #   * VAN: both Sites' sites-in-network, connector/listener match, link status.
+#   * Verdict: PASS, FAIL, or CATCHING UP. If the probe has not arrived but
+#     the passive's WAL replay position is moving (or the primary reports the
+#     replica in "catchup"), replication is working through a backlog — e.g.
+#     the active site was down for hours. That is reported, not failed.
 #   * Storage: PVC state on both sides (the passive odoo-data PVC is Pending by
 #     design — WaitForFirstConsumer — until failover scales Odoo up).
 #
@@ -213,7 +217,59 @@
         container: postgres
         command: psql -q -U postgres -d odoo -tAc "SELECT count(*) FROM dr_probe WHERE name = '{{ probe_name }}'"
       register: probe_check
+      # On a replica that is far behind, dr_probe itself may not exist yet.
+      # That is "not arrived", not a broken playbook.
+      failed_when: false
       when: probe_name | length > 0
+
+    - name: Record whether the probe arrived
+      ansible.builtin.set_fact:
+        probe_found: "{{ (probe_name | length > 0) and ((probe_check.stdout | default('0') | trim) == '1') }}"
+
+    # Probe missing is ambiguous: replication broken, or a backlog of WAL
+    # still being replayed (e.g. after the active site was down for hours —
+    # the primary then reports the replica in state "catchup"). Sample the
+    # replay position twice; if it moves, the replica is working, just behind.
+    - name: Sample the passive replay position (1 of 2)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ passive_pod }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT coalesce(pg_last_wal_replay_lsn()::text,'')"
+      register: replay_1
+      failed_when: false
+      when: probe_name | length > 0 and not probe_found | bool
+
+    - name: Give replay a moment to advance
+      ansible.builtin.pause:
+        seconds: 10
+      when: probe_name | length > 0 and not probe_found | bool
+
+    - name: Sample the passive replay position (2 of 2)
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: "{{ ns }}"
+        pod: "{{ passive_pod }}"
+        container: postgres
+        command: psql -q -U postgres -tAc "SELECT coalesce(pg_last_wal_replay_lsn()::text,'')"
+      register: replay_2
+      failed_when: false
+      when: probe_name | length > 0 and not probe_found | bool
+
+    - name: Decide whether the replica is catching up
+      ansible.builtin.set_fact:
+        replay_moving: >-
+          {{ (replay_1.stdout | default('') | trim | length > 0) and
+             (replay_1.stdout | default('') | trim) != (replay_2.stdout | default('') | trim) }}
+        primary_says_catchup: "{{ ' catchup' in (hostvars['active_site'].repl.stdout | default('')) }}"
+      when: probe_name | length > 0 and not probe_found | bool
+
+    - name: Record the catch-up verdict
+      ansible.builtin.set_fact:
+        catching_up: >-
+          {{ (probe_name | length > 0) and not probe_found | bool and
+             ((replay_moving | default(false) | bool) or (primary_says_catchup | default(false) | bool)) }}
 
     - name: Row counts and newest records on passive
       kubernetes.core.k8s_exec:
@@ -314,7 +370,7 @@
           - "active   : {{ hostvars['active_site'].active_phase }} · ready instances={{ hostvars['active_site'].active_instances }} · primary={{ hostvars['active_site'].primary_pod }} · replicator role={{ 'present' if (hostvars['active_site'].role.stdout | trim) == '1' else 'MISSING' }}"
           - "active   : streaming clients → {{ (hostvars['active_site'].repl.stdout | trim | replace('\n',' ; ')) or 'NONE' }}"
           - "passive  : {{ passive_phase }} · replica.enabled={{ passive_is_replica }} · {{ lag.stdout | trim }}"
-          - "probe    : {{ ('wrote \"' ~ probe_name ~ '\" on active → ' ~ ('FOUND on passive ✔' if (probe_check.stdout | default('0') | trim) == '1' else 'NOT (yet) on passive ✘')) if probe_name | length > 0 else 'skipped (write_probe=false)' }}"
+          - "probe    : {{ ('wrote \"' ~ probe_name ~ '\" on active → ' ~ ('FOUND on passive ✔' if probe_found | bool else ('not on passive yet — replica is CATCHING UP (replay ' ~ (replay_1.stdout | default('') | trim) ~ ' → ' ~ (replay_2.stdout | default('') | trim) ~ ') ⏳' if catching_up | bool else 'NOT on passive, and replay is not advancing ✘'))) if probe_name | length > 0 else 'skipped (write_probe=false)' }}"
           - "active   : {{ hostvars['active_site'].active_counts.stdout | trim }}"
           - "passive  : {{ passive_counts.stdout | trim }}"
           - "════════════ FILESTORE (VolSync rsync-tls over the VAN) ════════════"
@@ -336,6 +392,11 @@
           - (p_site_n | int) >= 2
           - passive_is_replica | bool
           - "'in_recovery=t' in (lag.stdout | default(''))"
-          - (probe_name | length == 0) or ((probe_check.stdout | default('0') | trim) == '1')
-        success_msg: "PASS — VAN linked, passive is a streaming replica, and the probe row crossed clouds."
+          - (probe_name | length == 0) or (probe_found | bool) or (catching_up | bool)
+        success_msg: >-
+          {{ 'CATCHING UP — VAN linked and the passive replica is replaying a WAL backlog;
+          the probe has not arrived yet. Not a fault: re-run in a few minutes (lag above
+          shows how far behind). Expected after the active site was offline for a while.'
+          if catching_up | bool else
+          'PASS — VAN linked, passive is a streaming replica, and the probe row crossed clouds.' }}
         fail_msg: "FAIL — see the DIAGNOSIS above for which leg is broken."

@@ -199,9 +199,28 @@ LoadBalancer its Service sits `<pending>`). Restarting the `skupper-controller`
 pod clears it, so the play now does that itself: if either wait runs out, it
 restarts the controller once (`skupper_restart_controller.yml`) and waits
 again before failing. If the healthy Site then turns out to see both sites
-already, the handshake is skipped rather than redone. A token error of `404 No such access granted` means the passive
-cluster reached the *wrong* grant server — almost always a kubeconfig pointing
-at the wrong cluster; see the single-context rule in `docs/BOOTSTRAP.md`.
+already, the handshake is skipped rather than redone. A controller restart is
+always followed by a rollout restart of `skupper-router`
+(`skupper_restart_router.yml`), because the router reads its TLS certificate
+only at start and keeps serving a replaced one.
+
+Two more failure modes from real mornings, both handled now:
+
+- **Token `404 No such access granted` right after a fresh grant.** A link
+  Secret (`token-odoo-active-link`) left on the passive by an earlier run gets
+  redeemed in a loop and spends every redemption on the new grant — the active
+  controller logs "already redeemed". The play deletes the stale AccessToken,
+  Link **and Secret** before redeeming. (A wrong kubeconfig only explains a 404
+  if the grant URL in the error is not the active cluster.)
+- **Redeemed, but the sites never link** (`Link` Not Operational, passive
+  router log says `SSL certificate verify failed`). The active router is
+  serving a stale certificate. If the sites don't see each other within two
+  minutes, the play rolls the active router once and waits again.
+
+**`98-diagnose.yml`** reports **CATCHING UP** instead of FAIL when the probe row
+hasn't reached the passive yet but the replica's WAL replay position is moving
+(or the primary lists it in state `catchup`). After the active site has been
+offline for hours the backlog can take a while; re-run until it says PASS.
 
 **`06-cloudflare.yml`** talks to the Cloudflare v4 API directly with
 `ansible.builtin.uri` (no Ansible module exists for Cloudflare load balancers —
