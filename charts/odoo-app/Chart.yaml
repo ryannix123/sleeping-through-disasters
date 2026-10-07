@@ -1,0 +1,8 @@
+apiVersion: v2
+name: odoo-app
+description: Odoo 19 Community — active or pilot-light
+type: application
+version: 0.1.0
+keywords:
+  - sleeping-through-disasters
+  - disaster-recovery

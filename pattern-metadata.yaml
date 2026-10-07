@@ -1,0 +1,75 @@
+# Source of truth for the Validated Patterns documentation site and QE.
+# https://validatedpatterns.io/contribute/pattern-metadata/
+metadata_version: "1.0"
+name: sleeping-through-disasters
+pattern_version: "1.0"
+display_name: Sleeping Through Disasters
+description: >-
+  Active/passive disaster recovery for a stateful business application
+  (Odoo ERP) across two OpenShift clusters in different clouds, with
+  continuous database and filestore replication over Red Hat Service
+  Interconnect and an automated, split-brain-safe failover pipeline.
+repo_url: https://github.com/ryannix123/sleeping-through-disasters
+docs_repo_url: https://github.com/validatedpatterns/docs
+issues_url: https://github.com/ryannix123/sleeping-through-disasters/issues
+docs_url: https://validatedpatterns.io/patterns/sleeping-through-disasters/
+ci_url: https://validatedpatterns.io/ci/?pattern=sleeping-through-disasters
+tier: sandbox
+owners: ryannix123
+requirements:
+  hub: # ACM + Vault + the passive (recovery) site
+    compute:
+      platform:
+        aws:
+          replicas: 3
+          type: m5.2xlarge
+        azure:
+          replicas: 3
+          type: Standard_D8s_v5
+        gcp:
+          replicas: 3
+          type: n2-standard-8
+    controlPlane:
+      platform:
+        aws:
+          replicas: 3
+          type: m5.xlarge
+        azure:
+          replicas: 3
+          type: Standard_D4s_v5
+        gcp:
+          replicas: 3
+          type: n2-standard-4
+  spoke: # the active site (clusterGroup=active)
+    compute:
+      platform:
+        aws:
+          replicas: 3
+          type: m5.xlarge
+        azure:
+          replicas: 3
+          type: Standard_D4s_v5
+        gcp:
+          replicas: 3
+          type: n2-standard-4
+    controlPlane:
+      platform:
+        aws:
+          replicas: 3
+          type: m5.xlarge
+        azure:
+          replicas: 3
+          type: Standard_D4s_v5
+        gcp:
+          replicas: 3
+          type: n2-standard-4
+extra_features:
+  hypershift_support: false
+  spoke_support: true
+external_requirements:
+  cluster_sizing_note: >-
+    Two clusters, ideally in different clouds or regions: the hub (ACM,
+    Vault, and the passive site) and one managed cluster for the active site.
+    Both sites have also run as single-node OpenShift with
+    global.odooDR.sizing set to sno. Optional: a Cloudflare account with Load
+    Balancing for automatic edge failover.

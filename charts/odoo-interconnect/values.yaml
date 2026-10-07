@@ -1,0 +1,22 @@
+# active  — accepts the link (linkAccess), publishes the PostgreSQL primary,
+#           and reaches the passive VolSync destination through a Listener
+# passive — dials the active site, reaches the primary through a Listener,
+#           and publishes its VolSync destination
+role: active
+
+namespace: odoo
+
+# linkAccess on the active site. "default" uses a Route on OpenShift.
+linkAccess: default
+
+global:
+  pattern: sleeping-through-disasters
+
+# Grants the clustergroup's imperative service account the few writes the
+# Skupper jobs need (ansible/imperative/), scoped to this namespace and the
+# operator namespace. Everything else stays read-only.
+imperativeAccess:
+  enabled: true
+  serviceAccount: imperative-sa
+  serviceAccountNamespace: imperative
+  controllerNamespace: openshift-operators

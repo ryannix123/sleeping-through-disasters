@@ -1,5 +1,7 @@
 # Teardown — removing the pattern completely
 
+> **Validated Patterns branch:** installation here is `./pattern.sh make install` (see the README's Install section). This document describes the `main` branch's Ansible + ApplicationSet layout; the parts about install phases 01–05, ApplicationSets and the Ansible vault do not apply on this branch. Day-two playbooks (preflight, diagnose, verify) still work.
+
 How to remove every component the pattern deploys, in an order that actually
 works. Use this before a fresh redeploy, or to decommission.
 

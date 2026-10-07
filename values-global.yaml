@@ -1,0 +1,39 @@
+---
+global:
+  pattern: sleeping-through-disasters
+  singleArgoCD: true
+  secretLoader:
+    disabled: false
+  options:
+    useCSV: false
+    syncPolicy: Automatic
+    installPlanApproval: Automatic
+
+  # ── Pattern settings (read by the charts in charts/) ─────────────────────
+  odooDR:
+    # Sizing profile, applied through overrides/values-sizing-<profile>.yaml.
+    #   standard — production-shaped: 2-instance PostgreSQL with quorum sync
+    #   sno      — single-node OpenShift / small demo clusters: 1 instance,
+    #              smaller requests
+    sizing: standard
+
+    # Public hostname users reach (and the optional Cloudflare load balancer
+    # fronts). Empty = no shared-hostname Route; each site keeps only its own
+    # default Route. Example: erp.example.com
+    publicHostname: ""
+
+    # Optional edge failover with Cloudflare Load Balancing. When enabled the
+    # hub (passive site) also gets the webhook listener and health poller that
+    # can trigger the failover pipeline. Disabled, failover is started by hand
+    # (see docs/FAILOVER.md). Requires the cloudflare secrets in
+    # values-secret.yaml and ansible/playbooks/06-cloudflare.yml after install.
+    cloudflare:
+      enabled: false
+
+main:
+  # The hub runs ACM and Vault AND is the passive (recovery) site. The active
+  # site is a managed cluster in the "active" clustergroup.
+  clusterGroupName: hub
+  multiSourceConfig:
+    enabled: true
+    clusterGroupChartVersion: "0.9.*"

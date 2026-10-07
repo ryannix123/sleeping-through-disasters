@@ -1,0 +1,107 @@
+---
+# ── The ACTIVE site: a managed cluster labelled clusterGroup=active ─────────
+#
+# ACM installs OpenShift GitOps here and points it at this file; the site then
+# pulls its own configuration (the framework's pull model). Secrets come from
+# the hub's Vault through External Secrets.
+clusterGroup:
+  name: active
+  isHubCluster: false
+
+  namespaces:
+    external-secrets-operator:
+      operatorGroup: true
+      targetNamespaces: []
+    external-secrets:
+    openshift-adp:
+      operatorGroup: true
+      targetNamespaces:
+        - openshift-adp
+    odoo:
+      operatorGroup: false
+      labels:
+        app.kubernetes.io/part-of: odoo-dr
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+      annotations:
+        openshift.io/display-name: "Odoo ERP"
+        openshift.io/description: "Odoo 19 Community - business of record for the DR pattern"
+        argocd.argoproj.io/sync-options: Prune=false,Delete=false
+
+  subscriptions:
+    eso:
+      name: openshift-external-secrets-operator
+      namespace: external-secrets-operator
+    cnpg:
+      name: cloudnative-pg
+      namespace: openshift-operators
+      source: certified-operators
+    volsync:
+      name: volsync-product
+      namespace: openshift-operators
+    interconnect:
+      name: skupper-operator
+      namespace: openshift-operators
+    pipelines:
+      name: openshift-pipelines-operator-rh
+      namespace: openshift-operators
+    oadp:
+      name: redhat-oadp-operator
+      namespace: openshift-adp
+
+  argoProjects:
+    - active
+    - odoo-dr
+
+  sharedValueFiles:
+    - '/overrides/values-sizing-{{ $.Values.global.odooDR.sizing }}.yaml'
+
+  applications:
+    openshift-external-secrets:
+      name: openshift-external-secrets
+      namespace: external-secrets
+      argoProject: active
+      chart: openshift-external-secrets
+      chartVersion: 0.0.*
+    odoo-database:
+      name: odoo-database
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-database
+      overrides:
+        - name: role
+          value: active
+    odoo-interconnect:
+      name: odoo-interconnect
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-interconnect
+      overrides:
+        - name: role
+          value: active
+    odoo-filestore:
+      name: odoo-filestore
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-filestore
+      overrides:
+        - name: role
+          value: active
+    odoo-app:
+      name: odoo-app
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-app
+      overrides:
+        - name: role
+          value: active
+
+  # Repairs this site's half of the Skupper faults (wedged controller,
+  # router serving a replaced certificate). The link itself is created from
+  # the hub (values-hub.yaml).
+  imperative:
+    jobs:
+      - name: skupper-selfheal
+        playbook: ansible/imperative/skupper-selfheal.yml
+        timeout: 420

@@ -1,0 +1,255 @@
+---
+# Imperative job (hub = passive site, every 10 minutes): create the Service
+# Interconnect link to the active site when it is missing.
+#
+# Why imperative: a Skupper access grant is minted at runtime and every token
+# is single-use, so neither is stable desired state for Git. This job does
+# exactly what a working manual handshake does, from the hub alone:
+#
+#   active  (through ACM): a ManifestWork carries an AccessGrant to the active
+#            cluster; ManifestWork status feedback returns its url/code/ca
+#   passive (locally):     clear any stale token/link/link Secret, apply an
+#            AccessToken, wait for redemption, then for both Sites to link
+#
+# No kubeconfig for the active site exists anywhere. Idempotent: if the
+# passive Site already sees two sites it does nothing, so it also re-links
+# automatically after either site reboots.
+#
+# Lessons carried over from the ansible/playbooks/05 era (2026-10-06):
+#   * A leftover link Secret on the passive keeps re-redeeming against each
+#     NEW grant and spends it; the fresh token then gets 404 "No such access
+#     granted". The stale Secret is deleted before every redeem.
+#   * Redeemed-but-not-linked is usually the active router serving a replaced
+#     certificate. The active site's own skupper-selfheal job fixes that; this
+#     job just reports it.
+- name: Link the passive site to the active site
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ns: odoo
+    active_group: active
+    work_name: odoo-dr-link-grant
+    grant_name: odoo-link-grant
+    token_name: token-odoo-active-link
+  tasks:
+    - name: Read the passive Site
+      kubernetes.core.k8s_info:
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ ns }}"
+      register: site
+
+    - name: Stop if there is no passive Site yet, or it is already linked
+      ansible.builtin.meta: end_play
+      when: >-
+        site.resources | length == 0 or
+        (site.resources[0].status.sitesInNetwork | default(0) | int) >= 2
+
+    - name: Stop if the passive Site is not Ready (skupper-selfheal handles that)
+      ansible.builtin.meta: end_play
+      when: (site.resources[0].status.status | default('')) != 'Ready'
+
+    - name: Find the active managed cluster
+      kubernetes.core.k8s_info:
+        api_version: cluster.open-cluster-management.io/v1
+        kind: ManagedCluster
+        label_selectors:
+          - "clusterGroup={{ active_group }}"
+      register: mc
+
+    - name: Pick the available one
+      ansible.builtin.set_fact:
+        active_cluster: >-
+          {%- set found = namespace(name='') -%}
+          {%- for c in mc.resources -%}
+            {%- for cond in c.status.conditions | default([]) -%}
+              {%- if found.name == '' and cond.type == 'ManagedClusterConditionAvailable' and cond.status == 'True' -%}
+                {%- set found.name = c.metadata.name -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ found.name }}
+
+    - name: Stop if no active cluster is imported and available
+      ansible.builtin.meta: end_play
+      when: active_cluster | length == 0
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: "Passive Site sees {{ site.resources[0].status.sitesInNetwork | default(0) }} site(s); linking to {{ active_cluster }}."
+
+    # ── active: a fresh single-use grant, delivered by ManifestWork ──────────
+    # Replace rather than reuse: a grant may already be spent by an earlier
+    # attempt. Deleting the ManifestWork deletes the AccessGrant it carried.
+    - name: Remove the grant from an earlier attempt
+      kubernetes.core.k8s:
+        state: absent
+        api_version: work.open-cluster-management.io/v1
+        kind: ManifestWork
+        name: "{{ work_name }}"
+        namespace: "{{ active_cluster }}"
+        wait: true
+        wait_timeout: 120
+
+    - name: Issue a single-use grant on the active site
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: work.open-cluster-management.io/v1
+          kind: ManifestWork
+          metadata:
+            name: "{{ work_name }}"
+            namespace: "{{ active_cluster }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          spec:
+            workload:
+              manifests:
+                - apiVersion: skupper.io/v2alpha1
+                  kind: AccessGrant
+                  metadata:
+                    name: "{{ grant_name }}"
+                    namespace: "{{ ns }}"
+                    labels:
+                      app.kubernetes.io/part-of: odoo-dr
+                  spec:
+                    redemptionsAllowed: 1
+                    expirationWindow: 1h
+            manifestConfigs:
+              - resourceIdentifier:
+                  group: skupper.io
+                  resource: accessgrants
+                  name: "{{ grant_name }}"
+                  namespace: "{{ ns }}"
+                feedbackRules:
+                  - type: JSONPaths
+                    jsonPaths:
+                      - {name: status, path: .status.status}
+                      - {name: url, path: .status.url}
+                      - {name: code, path: .status.code}
+                      - {name: ca, path: .status.ca}
+
+    - name: Wait for the grant's url, code and CA to come back
+      kubernetes.core.k8s_info:
+        api_version: work.open-cluster-management.io/v1
+        kind: ManifestWork
+        name: "{{ work_name }}"
+        namespace: "{{ active_cluster }}"
+      register: work
+      retries: 24
+      delay: 10
+      until: >-
+        work.resources | length > 0 and
+        (work.resources[0].status.resourceStatus.manifests | default([]) | length > 0) and
+        (work.resources[0].status.resourceStatus.manifests[0].statusFeedback['values'] | default([])
+         | selectattr('name', 'in', ['url', 'code', 'ca'])
+         | map(attribute='fieldValue.string') | select | list | length) == 3
+      failed_when: false
+
+    - name: Collect the grant
+      ansible.builtin.set_fact:
+        grant: >-
+          {{ dict((work.resources[0].status.resourceStatus.manifests[0].statusFeedback['values'] | default([]))
+                  | map(attribute='name')
+                  | zip((work.resources[0].status.resourceStatus.manifests[0].statusFeedback['values'] | default([]))
+                        | map(attribute='fieldValue.string'))) }}
+      when:
+        - work.resources | length > 0
+        - work.resources[0].status.resourceStatus.manifests | default([]) | length > 0
+
+    - name: Fail clearly if the grant never issued
+      ansible.builtin.assert:
+        that:
+          - grant is defined
+          - grant.url | default('') | length > 0
+          - grant.code | default('') | length > 0
+          - grant.ca | default('') | length > 0
+        fail_msg: >-
+          The active site never issued the access grant (status:
+          {{ grant.status | default('unknown') if grant is defined else 'no feedback' }}).
+          Its skupper-selfheal job restarts a wedged controller; this job
+          retries on its next run. Check the ManifestWork {{ work_name }} in
+          namespace {{ active_cluster }} on the hub.
+
+    # ── passive: redeem ──────────────────────────────────────────────────────
+    - name: Remove a stale token, link and link Secret from an earlier attempt
+      kubernetes.core.k8s:
+        state: absent
+        api_version: "{{ item.api_version }}"
+        kind: "{{ item.kind }}"
+        name: "{{ token_name }}"
+        namespace: "{{ ns }}"
+        wait: true
+      loop:
+        - {api_version: skupper.io/v2alpha1, kind: AccessToken}
+        - {api_version: skupper.io/v2alpha1, kind: Link}
+        - {api_version: v1, kind: Secret}
+      loop_control:
+        label: "{{ item.kind }}"
+
+    - name: Apply the AccessToken (this is the redeem)
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: skupper.io/v2alpha1
+          kind: AccessToken
+          metadata:
+            name: "{{ token_name }}"
+            namespace: "{{ ns }}"
+            labels:
+              app.kubernetes.io/part-of: odoo-dr
+          spec:
+            url: "{{ grant.url }}"
+            code: "{{ grant.code }}"
+            ca: "{{ grant.ca }}"
+
+    - name: Wait for the token to be redeemed
+      kubernetes.core.k8s_info:
+        api_version: skupper.io/v2alpha1
+        kind: AccessToken
+        name: "{{ token_name }}"
+        namespace: "{{ ns }}"
+      register: token
+      retries: 12
+      delay: 10
+      until: token.resources | length > 0 and (token.resources[0].status.redeemed | default(false)) | bool
+      failed_when: false
+
+    - name: Fail with Skupper's own message if redemption did not happen
+      ansible.builtin.assert:
+        that:
+          - token.resources | length > 0
+          - (token.resources[0].status.redeemed | default(false)) | bool
+        fail_msg: >-
+          The AccessToken was not redeemed. Skupper says:
+          "{{ (token.resources[0].status.message | default('no message')) if token.resources | length > 0 else 'token not found' }}".
+          A 404 "No such access granted" means the grant was spent before this
+          token used it; the next run issues a fresh grant and retries.
+
+    - name: Wait for both Sites to see each other
+      kubernetes.core.k8s_info:
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ ns }}"
+      register: site_after
+      retries: 15
+      delay: 10
+      until: >-
+        site_after.resources | length > 0 and
+        (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2
+      failed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'VAN is up: the passive Site sees ' ~ site_after.resources[0].status.sitesInNetwork ~
+             ' sites. PostgreSQL and the filestore now replicate across it.'
+             if (site_after.resources[0].status.sitesInNetwork | default(0) | int) >= 2 else
+             link_pending_msg }}
+      vars:
+        link_pending_msg: >-
+          Token redeemed but the sites have not linked yet. Usually the active
+          router is serving a replaced certificate; the active site's
+          skupper-selfheal job rolls it within 10 minutes, and this job
+          re-checks on its next run.

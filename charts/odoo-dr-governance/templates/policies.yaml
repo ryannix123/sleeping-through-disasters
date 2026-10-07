@@ -1,0 +1,102 @@
+---
+# Required operators are present on BOTH sites.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: odoo-required-operators
+  namespace: '{{ .Values.policyNamespace }}'
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    policy.open-cluster-management.io/categories: CM Configuration Management
+    policy.open-cluster-management.io/controls: CM-2 Baseline Configuration
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+  - objectDefinition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: ConfigurationPolicy
+      metadata:
+        name: cnpg-installed
+      spec:
+        remediationAction: inform
+        severity: high
+        object-templates:
+        - complianceType: musthave
+          objectDefinition:
+            apiVersion: operators.coreos.com/v1alpha1
+            kind: Subscription
+            metadata:
+              name: cloudnative-pg
+              namespace: openshift-operators
+  - objectDefinition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: ConfigurationPolicy
+      metadata:
+        name: volsync-installed
+      spec:
+        remediationAction: inform
+        severity: high
+        object-templates:
+        - complianceType: musthave
+          objectDefinition:
+            apiVersion: operators.coreos.com/v1alpha1
+            kind: Subscription
+            metadata:
+              name: volsync-product
+              namespace: openshift-operators
+  - objectDefinition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: ConfigurationPolicy
+      metadata:
+        name: interconnect-installed
+      spec:
+        remediationAction: inform
+        severity: high
+        object-templates:
+        - complianceType: musthave
+          objectDefinition:
+            apiVersion: operators.coreos.com/v1alpha1
+            kind: Subscription
+            metadata:
+              name: skupper-operator
+              namespace: openshift-operators
+---
+# The passive database is still a replica. NonCompliant after a failover is
+# expected: it is the record that a promotion happened.
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: odoo-standby-in-replica-mode
+  namespace: '{{ .Values.policyNamespace }}'
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    policy.open-cluster-management.io/categories: SI System and Information Integrity
+    policy.open-cluster-management.io/controls: SI-13 Predictable Failure Prevention
+    policy.open-cluster-management.io/standards: NIST SP 800-53
+spec:
+  remediationAction: inform
+  disabled: false
+  policy-templates:
+  - objectDefinition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: ConfigurationPolicy
+      metadata:
+        name: standby-replica-enabled
+      spec:
+        remediationAction: inform
+        severity: high
+        object-templates:
+        - complianceType: musthave
+          objectDefinition:
+            apiVersion: postgresql.cnpg.io/v1
+            kind: Cluster
+            metadata:
+              name: odoo-db
+              namespace: odoo
+            spec:
+              replica:
+                enabled: true

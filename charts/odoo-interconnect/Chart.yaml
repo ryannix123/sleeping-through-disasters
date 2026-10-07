@@ -1,0 +1,8 @@
+apiVersion: v2
+name: odoo-interconnect
+description: Red Hat Service Interconnect site, connectors and listeners
+type: application
+version: 0.1.0
+keywords:
+  - sleeping-through-disasters
+  - disaster-recovery

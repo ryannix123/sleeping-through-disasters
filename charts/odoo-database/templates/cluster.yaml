@@ -1,0 +1,111 @@
+{{- $active := eq .Values.role "active" }}
+---
+{{- if $active }}
+# CloudNativePG primary for the ACTIVE site.
+#
+# Two-tier replication:
+#   Tier 1 (here)  — local replicas with quorum synchronous replication:
+#                    RPO 0 and automatic promotion for a node or zone loss.
+#   Tier 2 (passive site) — asynchronous streaming across the Service
+#                    Interconnect VAN: seconds of RPO for a regional loss, and
+#                    it never blocks a production write.
+{{- else }}
+# CloudNativePG REPLICA cluster for the PASSIVE site.
+#
+# Streams WAL from the active primary, reached at "odoo-db-primary" — a local
+# Service created by the Service Interconnect Listener that tunnels across the
+# VAN. The failover pipeline promotes it by setting spec.replica.enabled to
+# false; the passive Application ignores that field (see values-hub.yaml), so
+# Argo CD never reverts a promotion.
+{{- end }}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: odoo-db
+  namespace: {{ .Values.namespace }}
+  annotations:
+    {{- include "odoo-dr.protect" . | nindent 4 }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: database
+    odoo.dr/role: {{ ternary "primary" "standby" $active }}
+spec:
+  imageName: {{ .Values.postgres.image }}
+  instances: {{ ternary .Values.postgres.instances .Values.postgres.passiveInstances $active }}
+
+{{- if $active }}
+  bootstrap:
+    initdb:
+      database: odoo
+      owner: odoo
+      # Odoo's entrypoint may create/extend the database.
+      postInitSQL:
+        - ALTER ROLE odoo CREATEDB
+{{- else }}
+  replica:
+    enabled: true
+    source: odoo-db-active
+
+  bootstrap:
+    pg_basebackup:
+      source: odoo-db-active
+      # MUST match the active initdb. CNPG generates this cluster's odoo-db-app
+      # Secret from these fields (default app/app), and Odoo must be able to
+      # log in to the database it fails over to.
+      database: odoo
+      owner: odoo
+
+  externalClusters:
+    - name: odoo-db-active
+      connectionParameters:
+        host: odoo-db-primary
+        port: "5432"
+        user: replicator
+        dbname: odoo
+        sslmode: require
+      password:
+        name: odoo-replicator
+        key: password
+{{- end }}
+
+  storage:
+    size: {{ .Values.postgres.storage.size }}
+    {{- with .Values.postgres.storage.storageClass }}
+    storageClass: {{ . }}
+    {{- end }}
+
+  resources:
+    {{- toYaml .Values.postgres.resources | nindent 4 }}
+
+  postgresql:
+    parameters:
+      {{- range $k, $v := .Values.postgres.parameters }}
+      {{ $k }}: {{ $v | quote }}
+      {{- end }}
+{{- if $active }}
+    pg_hba:
+      # The passive site's replication user, in over the VAN. CNPG's built-in
+      # streaming_replica role uses client certificates; rather than plumbing
+      # certificates between clusters, a password role is declared below.
+      - host replication replicator all scram-sha-256
+{{- if gt (int .Values.postgres.instances) 1 }}
+    # Quorum synchronous replication to the LOCAL replica only. The
+    # cross-cluster replica stays asynchronous by design.
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+{{- end }}
+
+  managed:
+    roles:
+      - name: replicator
+        ensure: present
+        login: true
+        replication: true
+        passwordSecret:
+          name: odoo-replicator
+{{- end }}
+
+  monitoring:
+    enablePodMonitor: true

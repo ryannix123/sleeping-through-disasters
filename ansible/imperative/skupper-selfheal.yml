@@ -1,0 +1,212 @@
+---
+# Imperative job (both sites, every 10 minutes): repair the Skupper faults
+# this pattern has hit in practice with Red Hat Service Interconnect 2.2.2.
+#
+#   1. Wedged controller after a reboot or upgrade: the Site never goes
+#      Ready, or (active site) the access grant is never issued.
+#      Fix: restart the controller pod.
+#   2. Router serving a replaced certificate: the router loads
+#      skupper-site-server only at start, so after the controller re-issues it
+#      the peer refuses the handshake ("SSL certificate verify failed") and the
+#      Link sits Not Operational. Fix: roll the router.
+#
+# Each repair is rate-limited without keeping state: the controller is only
+# restarted after it has run for 30+ minutes, and the router is only rolled
+# when its certificate changed AFTER the router started — which the roll
+# itself cures, so it cannot loop.
+#
+# Runs in-cluster as the imperative service account: read access is the
+# framework default, the few writes come from charts/odoo-interconnect.
+- name: Skupper self-heal
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    ns: odoo
+    controller_ns: openshift-operators
+    controller_selector: app.kubernetes.io/name=skupper-controller
+    controller_min_age_minutes: 30
+    site_grace_minutes: 10
+    grant_grace_minutes: 5
+    cert_slack_seconds: 60
+    iso: "%Y-%m-%dT%H:%M:%SZ"
+    is_active: "{{ (clusterGroup.name | default('')) == 'active' }}"
+  tasks:
+    - name: Note the time (UTC)
+      ansible.builtin.set_fact:
+        now_iso: "{{ now(utc=true).strftime(iso) }}"
+
+    - name: Read the Site
+      kubernetes.core.k8s_info:
+        api_version: skupper.io/v2alpha1
+        kind: Site
+        namespace: "{{ ns }}"
+      register: site
+
+    - name: Nothing to heal until the Site exists
+      ansible.builtin.meta: end_play
+      when: site.resources | length == 0
+
+    - name: Read the controller pod(s)
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ controller_ns }}"
+        label_selectors:
+          - "{{ controller_selector }}"
+      register: ctrl
+
+    - name: Read our link grant (active site only)
+      kubernetes.core.k8s_info:
+        api_version: skupper.io/v2alpha1
+        kind: AccessGrant
+        name: odoo-link-grant
+        namespace: "{{ ns }}"
+      register: grant
+      when: is_active | bool
+
+    - name: Assess the Site, controller and grant
+      ansible.builtin.set_fact:
+        site_ready: "{{ (site.resources[0].status.status | default('')) == 'Ready' }}"
+        site_age_min: >-
+          {{ (((now_iso | to_datetime(iso)) -
+               (site.resources[0].metadata.creationTimestamp | to_datetime(iso))).total_seconds() // 60) | int }}
+        ctrl_started: "{{ ctrl.resources | map(attribute='status.startTime') | select('defined') | list | min | default(now_iso, true) }}"
+        grant_obj: "{{ (grant.resources | default([]))[0] | default({}) }}"
+
+    - name: Decide whether the controller is wedged
+      ansible.builtin.set_fact:
+        ctrl_age_min: "{{ (((now_iso | to_datetime(iso)) - (ctrl_started | to_datetime(iso))).total_seconds() // 60) | int }}"
+        grant_stuck: >-
+          {{ (grant_obj | length > 0) and
+             (grant_obj.status.status | default('')) != 'Ready' and
+             (((now_iso | to_datetime(iso)) - (grant_obj.metadata.creationTimestamp | to_datetime(iso))).total_seconds() // 60)
+               >= grant_grace_minutes }}
+        site_stuck: "{{ (not site_ready | bool) and (site_age_min | int) >= site_grace_minutes }}"
+
+    - name: Report
+      ansible.builtin.debug:
+        msg: >-
+          Site {{ site.resources[0].metadata.name }}: status={{ site.resources[0].status.status | default('none') }},
+          sites in network={{ site.resources[0].status.sitesInNetwork | default(0) }};
+          controller up {{ ctrl_age_min }} min;
+          {{ 'Site stuck; ' if site_stuck | bool else '' }}{{ 'grant stuck; ' if grant_stuck | bool else '' }}
+          {{ 'controller looks WEDGED' if (site_stuck | bool or grant_stuck | bool) else 'controller healthy' }}
+
+    # ── 1. wedged controller ─────────────────────────────────────────────────
+    - name: Leave a wedged-but-young controller alone (rate limit)
+      ansible.builtin.debug:
+        msg: >-
+          Controller looks wedged but has only been up {{ ctrl_age_min }} min
+          (< {{ controller_min_age_minutes }}); will restart it on a later run if it persists.
+      when:
+        - site_stuck | bool or grant_stuck | bool
+        - (ctrl_age_min | int) < controller_min_age_minutes
+
+    - name: Restart the wedged controller
+      when:
+        - site_stuck | bool or grant_stuck | bool
+        - (ctrl_age_min | int) >= controller_min_age_minutes
+      block:
+        - name: Delete the controller pod(s)
+          kubernetes.core.k8s:
+            state: absent
+            kind: Pod
+            namespace: "{{ controller_ns }}"
+            name: "{{ item.metadata.name }}"
+            wait: false
+          loop: "{{ ctrl.resources }}"
+          loop_control:
+            label: "{{ item.metadata.name }}"
+
+        - name: Wait for the replacement controller to be Ready
+          kubernetes.core.k8s_info:
+            kind: Pod
+            namespace: "{{ controller_ns }}"
+            label_selectors:
+              - "{{ controller_selector }}"
+          register: ctrl_new
+          retries: 18
+          delay: 10
+          until: >-
+            ctrl_new.resources
+            | rejectattr('metadata.deletionTimestamp', 'defined')
+            | rejectattr('metadata.name', 'in', ctrl.resources | map(attribute='metadata.name') | list)
+            | map(attribute='status.conditions') | map('default', [])
+            | map('selectattr', 'type', 'equalto', 'Ready')
+            | map('selectattr', 'status', 'equalto', 'True')
+            | map('list') | select | list | length > 0
+
+        # The new controller may re-issue the server certificate; give it a
+        # moment so the router check below sees the result on this same run.
+        - name: Let the new controller reconcile
+          ansible.builtin.pause:
+            seconds: 45
+
+    # ── 2. router serving a replaced certificate ─────────────────────────────
+    - name: Read the router Deployment
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: skupper-router
+        namespace: "{{ ns }}"
+      register: router
+
+    - name: Read the site server certificate Secret
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: skupper-site-server
+        namespace: "{{ ns }}"
+      register: server_cert
+
+    - name: Read the router pods
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: "{{ ns }}"
+        label_selectors: "{{ router.resources[0].spec.selector.matchLabels | dict2items | map('join', '=') | list }}"
+      register: router_pods
+      when: router.resources | length > 0
+
+    - name: Compare when the certificate changed with when the router started
+      ansible.builtin.set_fact:
+        # Last write to the Secret: newest managedFields entry, else creation.
+        cert_changed: >-
+          {{ ((server_cert.resources[0].metadata.managedFields | default([])
+               | map(attribute='time') | select('defined') | list)
+              + [server_cert.resources[0].metadata.creationTimestamp]) | max }}
+        router_started: "{{ router_pods.resources | map(attribute='status.startTime') | select('defined') | list | min }}"
+      when:
+        - server_cert.resources | default([]) | length > 0
+        - router_pods.resources | default([]) | length > 0
+
+    - name: Roll the router if it predates its certificate
+      kubernetes.core.k8s:
+        state: present
+        merge_type: merge
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: skupper-router
+            namespace: "{{ ns }}"
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ now_iso }}"
+        wait: true
+        wait_timeout: 300
+      when:
+        - cert_changed is defined
+        - router_started is defined
+        - ((cert_changed | to_datetime(iso)) - (router_started | to_datetime(iso))).total_seconds() > cert_slack_seconds
+
+    - name: Router status
+      ansible.builtin.debug:
+        msg: >-
+          {{ 'router started ' ~ router_started ~ ', certificate last changed ' ~ cert_changed ~
+             (' — ROLLED the router to load the new certificate'
+              if ((cert_changed | to_datetime(iso)) - (router_started | to_datetime(iso))).total_seconds() > cert_slack_seconds
+              else ' — router is current') }}
+      when:
+        - cert_changed is defined
+        - router_started is defined

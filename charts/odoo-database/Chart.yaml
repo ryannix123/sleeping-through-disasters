@@ -1,0 +1,8 @@
+apiVersion: v2
+name: odoo-database
+description: PostgreSQL (CloudNativePG) primary or cross-cluster replica
+type: application
+version: 0.1.0
+keywords:
+  - sleeping-through-disasters
+  - disaster-recovery

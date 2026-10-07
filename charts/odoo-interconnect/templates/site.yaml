@@ -1,0 +1,20 @@
+{{- $active := eq .Values.role "active" }}
+---
+# Service Interconnect Site. The link between the two sites is created by the
+# hub's imperative job (ansible/imperative/skupper-link.yml): the grant code is
+# generated at runtime and a token is single-use, so neither is stable desired
+# state that belongs in Git. GitOps owns the Sites, Listeners and Connectors.
+apiVersion: skupper.io/v2alpha1
+kind: Site
+metadata:
+  name: {{ ternary "odoo-active" "odoo-passive" $active }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+{{- if $active }}
+spec:
+  # The active site ACCEPTS the incoming link (it issues the AccessGrant).
+  linkAccess: {{ .Values.linkAccess }}
+{{- else }}
+spec: {}  # dials out to the active site; no linkAccess needed
+{{- end }}

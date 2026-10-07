@@ -1,0 +1,63 @@
+{{- if eq .Values.role "active" }}
+---
+# Filestore replication SOURCE (active site), rsync-tls over the VAN.
+#
+# PVC-to-PVC, no object storage. The destination is reached at
+# "odoo-volsync-dest", a local Service published by a Skupper Listener.
+#
+# CONSISTENCY: the database replicates in seconds, this volume on a schedule,
+# so a failover can briefly reference attachments not yet copied. Set Odoo's
+# ATTACHMENT_LOCATION=db to remove the window (see docs/ARCHITECTURE.md).
+# RPO FLOOR: VolSync does not stack jobs; if a sync outlasts the interval the
+# effective RPO is the sync duration (.status.lastSyncDuration).
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationSource
+metadata:
+  name: odoo-data
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: volsync
+spec:
+  sourcePVC: odoo-data
+  trigger:
+    schedule: {{ .Values.volsync.schedule | quote }}
+  rsyncTLS:
+    copyMethod: Snapshot
+    keySecret: {{ .Values.pskSecret.name }}
+    address: odoo-volsync-dest
+    {{- with .Values.volsync.volumeSnapshotClass }}
+    volumeSnapshotClassName: {{ . }}
+    {{- end }}
+{{- else }}
+---
+# Filestore replication DESTINATION (passive site), rsync-tls.
+#
+# Runs continuously behind a ClusterIP Service that a Skupper Connector
+# publishes onto the VAN. Each completed sync is snapshotted; the failover
+# pipeline rebuilds Odoo's volume from the newest snapshot.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationDestination
+metadata:
+  name: odoo-data
+  namespace: {{ .Values.namespace }}
+  annotations:
+    {{- include "odoo-dr.protect" . | nindent 4 }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: volsync
+spec:
+  rsyncTLS:
+    serviceType: ClusterIP
+    copyMethod: Snapshot
+    keySecret: {{ .Values.pskSecret.name }}
+    capacity: {{ .Values.volsync.capacity }}
+    accessModes:
+      - ReadWriteOnce
+    {{- with .Values.volsync.storageClass }}
+    storageClassName: {{ . }}
+    {{- end }}
+    {{- with .Values.volsync.volumeSnapshotClass }}
+    volumeSnapshotClassName: {{ . }}
+    {{- end }}
+{{- end }}

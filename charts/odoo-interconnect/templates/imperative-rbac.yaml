@@ -1,0 +1,74 @@
+{{- with .Values.imperativeAccess }}
+{{- if .enabled }}
+---
+# Link handshake and self-healing (ansible/imperative/skupper-*.yml):
+#   * create/delete AccessTokens and Links (redeem on the passive site)
+#   * delete the stale link Secret that otherwise spends every new grant
+#   * roll the router Deployment so it reloads a re-issued certificate
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: odoo-dr-imperative
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["skupper.io"]
+    resources: ["accesstokens", "links"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["token-odoo-active-link"]
+    verbs: ["get", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["skupper-router"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: odoo-dr-imperative
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: odoo-dr-imperative
+subjects:
+  - kind: ServiceAccount
+    name: {{ .serviceAccount }}
+    namespace: {{ .serviceAccountNamespace }}
+---
+# Restart a wedged Skupper controller (known RHSI 2.2.2 fault after a reboot:
+# the Site never goes Ready, or the grant server never issues).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: odoo-dr-imperative-skupper-controller
+  namespace: {{ .controllerNamespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: odoo-dr-imperative-skupper-controller
+  namespace: {{ .controllerNamespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: odoo-dr-imperative-skupper-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ .serviceAccount }}
+    namespace: {{ .serviceAccountNamespace }}
+{{- end }}
+{{- end }}

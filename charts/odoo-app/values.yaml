@@ -1,0 +1,48 @@
+# active  — serving traffic; owns the filestore PVC
+# passive — pilot light: replicas 0 until failover. The failover pipeline
+#           creates the filestore PVC from VolSync's newest snapshot and
+#           scales the Deployment up (the hub Application ignores
+#           /spec/replicas, so Argo CD does not scale it back down).
+role: active
+
+namespace: odoo
+
+odoo:
+  image:
+    repository: quay.io/ryan_nix/odoo-openshift-dr
+    tag: "19.0"
+    pullPolicy: Always
+
+  filestore:
+    size: 20Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+# Loaded only when the ACTIVE database is first initialised. The passive site
+# is a replica and never initialises its own data.
+demoData: true
+initialModules: "base,contacts,sale_management,account,stock"
+
+# "file" keeps attachments on the VolSync-replicated PVC. "db" stores them in
+# PostgreSQL so they ride the database's replication stream (RPO 0 for
+# attachments). See docs/ARCHITECTURE.md.
+attachmentLocation: file
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+adminSecret:
+  key: secret/data/global/odoo-admin
+  refreshInterval: 2m0s
+
+global:
+  pattern: sleeping-through-disasters
+  odooDR:
+    publicHostname: ""

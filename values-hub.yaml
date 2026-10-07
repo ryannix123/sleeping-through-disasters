@@ -1,0 +1,194 @@
+---
+# ── The hub: ACM + Vault, and the PASSIVE (recovery) site ───────────────────
+#
+# The hub doubles as the passive site, so a two-cluster deployment is
+# complete: if the active site is lost, the cluster that runs the failover is
+# the one that survives. The active site is a managed cluster in the "active"
+# clustergroup (values-active.yaml).
+clusterGroup:
+  name: hub
+  isHubCluster: true
+
+  namespaces:
+    open-cluster-management:
+    vault:
+    external-secrets-operator:
+      operatorGroup: true
+      targetNamespaces: []
+    external-secrets:
+    openshift-adp:
+      operatorGroup: true
+      targetNamespaces:
+        - openshift-adp
+    odoo-dr-acm:
+      operatorGroup: false
+    odoo:
+      operatorGroup: false
+      labels:
+        app.kubernetes.io/part-of: odoo-dr
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+      annotations:
+        openshift.io/display-name: "Odoo ERP"
+        openshift.io/description: "Odoo 19 Community - business of record for the DR pattern"
+        # Argo CD must never delete this namespace: everything in it is
+        # customer data.
+        argocd.argoproj.io/sync-options: Prune=false,Delete=false
+
+  # Channels are omitted on purpose: each subscription follows the default
+  # channel of the cluster's catalog, which is built for that OpenShift
+  # release. Pin one only deliberately.
+  subscriptions:
+    acm:
+      name: advanced-cluster-management
+      namespace: open-cluster-management
+    eso:
+      name: openshift-external-secrets-operator
+      namespace: external-secrets-operator
+    cnpg:
+      name: cloudnative-pg
+      namespace: openshift-operators
+      source: certified-operators
+    volsync:
+      name: volsync-product
+      namespace: openshift-operators
+    interconnect:
+      name: skupper-operator
+      namespace: openshift-operators
+    pipelines:
+      name: openshift-pipelines-operator-rh
+      namespace: openshift-operators
+    oadp:
+      name: redhat-oadp-operator
+      namespace: openshift-adp
+
+  argoProjects:
+    - hub
+    - odoo-dr
+
+  sharedValueFiles:
+    - '/overrides/values-sizing-{{ $.Values.global.odooDR.sizing }}.yaml'
+
+  applications:
+    acm:
+      name: acm
+      namespace: open-cluster-management
+      argoProject: hub
+      chart: acm
+      chartVersion: 0.2.*
+    vault:
+      name: vault
+      namespace: vault
+      argoProject: hub
+      chart: hashicorp-vault
+      chartVersion: 0.1.*
+    openshift-external-secrets:
+      name: openshift-external-secrets
+      namespace: external-secrets
+      argoProject: hub
+      chart: openshift-external-secrets
+      chartVersion: 0.0.*
+    odoo-dr-governance:
+      name: odoo-dr-governance
+      namespace: odoo-dr-acm
+      argoProject: hub
+      path: charts/odoo-dr-governance
+
+    # ── passive site workloads ────────────────────────────────────────────
+    odoo-database:
+      name: odoo-database
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-database
+      overrides:
+        - name: role
+          value: passive
+      # PROMOTION SAFETY. The failover pipeline sets replica.enabled=false;
+      # Argo CD must never set it back. (Observed on the first live failover
+      # on the ApplicationSet layout: Argo un-promoted the database within
+      # seconds.) The pipeline's guard task checks this is in place.
+      ignoreDifferences:
+        - group: postgresql.cnpg.io
+          kind: Cluster
+          name: odoo-db
+          jsonPointers:
+            - /spec/replica/enabled
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - RespectIgnoreDifferences=true
+        retry:
+          limit: 20
+    odoo-interconnect:
+      name: odoo-interconnect
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-interconnect
+      overrides:
+        - name: role
+          value: passive
+    odoo-filestore:
+      name: odoo-filestore
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-filestore
+      overrides:
+        - name: role
+          value: passive
+    odoo-app:
+      name: odoo-app
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-app
+      overrides:
+        - name: role
+          value: passive
+      # Pilot light: Git says 0 replicas; the failover pipeline scales to 1.
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          name: odoo
+          jsonPointers:
+            - /spec/replicas
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - RespectIgnoreDifferences=true
+        retry:
+          limit: 20
+    odoo-failover:
+      name: odoo-failover
+      namespace: odoo
+      argoProject: odoo-dr
+      path: charts/odoo-failover
+
+  # ── Imperative jobs (every 10 minutes, idempotent) ─────────────────────
+  # The Service Interconnect link cannot be declared in Git: the access grant
+  # is minted at runtime and each token is single-use. These jobs create the
+  # link from the hub when it is missing and repair known Skupper faults.
+  # No kubeconfig for the active site is needed: the hub reaches it through
+  # ACM (ManifestWork with status feedback).
+  imperative:
+    jobs:
+      - name: skupper-selfheal
+        playbook: ansible/imperative/skupper-selfheal.yml
+        timeout: 420
+      - name: skupper-link
+        playbook: ansible/imperative/skupper-link.yml
+        timeout: 540
+    # The imperative service account keeps the framework's default
+    # cluster-wide READ-only role. The few writes these jobs need are granted
+    # as narrow namespaced Roles by charts/odoo-interconnect (odoo and
+    # openshift-operators) and charts/odoo-dr-governance (ManifestWorks).
+
+  managedClusterGroups:
+    active:
+      name: active
+      acmlabels:
+        - name: clusterGroup
+          value: active

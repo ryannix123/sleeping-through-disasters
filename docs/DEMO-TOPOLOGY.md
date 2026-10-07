@@ -1,5 +1,7 @@
 # Demo topology
 
+> **Validated Patterns branch:** installation here is `./pattern.sh make install` (see the README's Install section). This document describes the `main` branch's Ansible + ApplicationSet layout; the parts about install phases 01–05, ApplicationSets and the Ansible vault do not apply on this branch. Day-two playbooks (preflight, diagnose, verify) still work.
+
 The pattern describes three clusters. This document describes the two-machine
 environment used to demonstrate it, what that environment genuinely proves,
 and what it does not.

@@ -1,0 +1,61 @@
+{{- $active := eq .Values.role "active" }}
+{{- if $active }}
+---
+# Publishes the LOCAL PostgreSQL primary onto the VAN. The selector follows
+# whichever pod CNPG marks primary, so it survives an in-cluster failover.
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: odoo-db-primary
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+spec:
+  routingKey: odoo-db-primary
+  port: 5432
+  selector: cnpg.io/cluster=odoo-db,cnpg.io/instanceRole=primary
+---
+# A LOCAL Service "odoo-volsync-dest" that tunnels to the passive site's
+# VolSync rsync-tls destination. The ReplicationSource targets this address.
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: odoo-volsync-dest
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+spec:
+  routingKey: odoo-volsync-dest
+  host: odoo-volsync-dest
+  port: 8000
+{{- else }}
+---
+# A LOCAL Service "odoo-db-primary" that tunnels to the active site's
+# PostgreSQL primary. The CNPG replica's externalClusters host points here.
+# Deliberately not the same name as the local odoo-db-rw Service.
+apiVersion: skupper.io/v2alpha1
+kind: Listener
+metadata:
+  name: odoo-db-primary
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+spec:
+  routingKey: odoo-db-primary
+  host: odoo-db-primary
+  port: 5432
+---
+# Publishes the LOCAL VolSync rsync-tls destination onto the VAN. VolSync
+# names that Service volsync-rsync-tls-dst-<ReplicationDestination name>.
+apiVersion: skupper.io/v2alpha1
+kind: Connector
+metadata:
+  name: odoo-volsync-dest
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+spec:
+  routingKey: odoo-volsync-dest
+  port: 8000
+  host: volsync-rsync-tls-dst-odoo-data
+{{- end }}

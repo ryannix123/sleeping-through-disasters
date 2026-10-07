@@ -1,0 +1,26 @@
+{{- if eq .Values.role "active" }}
+---
+# Odoo filestore (attachments, sessions), mounted at /var/lib/odoo. Only the
+# active site declares it: on the passive site the failover pipeline builds it
+# from VolSync's newest snapshot, and a Git-declared empty volume would race
+# that restore.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: odoo-data
+  namespace: {{ .Values.namespace }}
+  annotations:
+    {{- include "odoo-dr.protect" . | nindent 4 }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.odoo.filestore.size }}
+  {{- with .Values.odoo.filestore.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,24 @@
+# Single-node OpenShift and small demo clusters (global.odooDR.sizing: sno).
+# These values reach every Application; each chart reads only its own keys.
+
+# odoo-database: one instance, since a single node cannot host a local
+# synchronous replica.
+postgres:
+  instances: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# odoo-app
+odoo:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 3Gi

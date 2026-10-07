@@ -1,5 +1,7 @@
 # Ansible automation
 
+> **Validated Patterns branch:** the install phases (01–05, `site.yml`) are replaced by `./pattern.sh make install`, and the Skupper link handshake now runs as framework imperative jobs in `ansible/imperative/`. The day-two playbooks below remain; see the README's Known gaps for the ones not yet ported.
+
 Build-time automation for the parts of this pattern that GitOps cannot own.
 
 ## What this does and does not do

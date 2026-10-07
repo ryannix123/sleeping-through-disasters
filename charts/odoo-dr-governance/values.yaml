@@ -1,0 +1,22 @@
+# ACM governance for the DR posture, deployed on the hub. Policies are
+# "inform" only: they report drift, they never change the clusters.
+policyNamespace: odoo-dr-acm
+
+# How the two sites are selected. The hub is the passive site
+# (ACM labels it local-cluster=true); the active site is the managed cluster
+# in the "active" clustergroup.
+activeSelector:
+  clusterGroup: active
+passiveSelector:
+  local-cluster: "true"
+
+global:
+  pattern: sleeping-through-disasters
+
+# The hub's imperative link job creates the AccessGrant on the active site as
+# a ManifestWork (in the active cluster's namespace on the hub) and reads the
+# grant URL/code/CA back through status feedback.
+imperativeAccess:
+  enabled: true
+  serviceAccount: imperative-sa
+  serviceAccountNamespace: imperative

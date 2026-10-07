@@ -1,0 +1,8 @@
+apiVersion: v2
+name: odoo-dr-governance
+description: ACM governance policies for the DR posture (hub)
+type: application
+version: 0.1.0
+keywords:
+  - sleeping-through-disasters
+  - disaster-recovery

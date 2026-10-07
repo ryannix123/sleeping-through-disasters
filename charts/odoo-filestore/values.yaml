@@ -1,0 +1,29 @@
+# active  — ReplicationSource: pushes the Odoo filestore every 2 minutes
+# passive — ReplicationDestination: receives it into a snapshotted volume
+role: active
+
+namespace: odoo
+
+volsync:
+  schedule: "*/2 * * * *"
+  capacity: 20Gi
+  # Empty = the cluster's defaults. LVM Storage (single-node) usually needs
+  # both set, e.g. lvms-vg1 — put that in a per-cluster values file
+  # (values-<cluster name>.yaml), not here.
+  storageClass: ""
+  volumeSnapshotClass: ""
+
+# rsync-tls pre-shared key. VolSync's docs recommend supplying the key to both
+# sides for GitOps instead of copying a generated one between clusters. It is
+# generated once in Vault (values-secret.yaml.template) and delivered to both
+# sites by External Secrets.
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+pskSecret:
+  name: odoo-volsync-psk
+  key: secret/data/global/odoo-volsync
+  refreshInterval: 2m0s
+
+global:
+  pattern: sleeping-through-disasters

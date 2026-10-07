@@ -1,0 +1,66 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+spec:
+  selector:
+    app: odoo
+  ports:
+    - name: http
+      port: 8069
+      targetPort: 8069
+    - name: longpoll
+      port: 8072
+      targetPort: 8072
+---
+# This site's own Route (cluster-generated hostname). Health checks and the
+# optional Cloudflare pools target these per-site names.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: odoo
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: app
+  annotations:
+    haproxy.router.openshift.io/timeout: "600s"
+spec:
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: odoo
+  port:
+    targetPort: http
+{{- with .Values.global.odooDR.publicHostname }}
+---
+# The PUBLIC hostname users hit. It exists on BOTH sites, so after a failover
+# the promoted passive site answers on the same name.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: odoo-erp
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: app
+  annotations:
+    haproxy.router.openshift.io/timeout: "600s"
+spec:
+  host: {{ . }}
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: odoo
+  port:
+    targetPort: http
+{{- end }}

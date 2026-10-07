@@ -1,0 +1,25 @@
+# Runs on the PASSIVE site (the hub). The pipeline uses only in-cluster
+# credentials; nothing outside OpenShift holds a cluster token.
+
+# Where the clustergroup chart creates the hub's Applications
+# (global.vpArgoNamespace with singleArgoCD: true).
+argoNamespace: openshift-gitops
+
+# Names of the passive-site Applications in values-hub.yaml. The failover
+# guard checks that they ignore the fields a promotion changes.
+applications:
+  database: odoo-database
+  app: odoo-app
+
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+cloudflareSecret:
+  key: secret/data/hub/cloudflare
+  refreshInterval: 2m0s
+
+global:
+  pattern: sleeping-through-disasters
+  odooDR:
+    cloudflare:
+      enabled: false

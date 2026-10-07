@@ -1,0 +1,15 @@
+---
+# The failover gate, as data. "false" = Phase 2a (detect + prepare, human
+# confirms). "true" = Phase 2b (lights-out). Flip with a one-line patch; the
+# poller picks it up on its next run.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-failover-config
+  namespace: odoo
+  labels:
+    app.kubernetes.io/part-of: odoo-dr
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false
+data:
+  auto_promote: "false"

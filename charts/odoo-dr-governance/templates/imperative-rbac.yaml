@@ -1,0 +1,33 @@
+{{- with .Values.imperativeAccess }}
+{{- if .enabled }}
+---
+# ManifestWorks live in each managed cluster's namespace on the hub, whose
+# name is only known after import, so this is a ClusterRole limited to the
+# ManifestWork resource.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: odoo-dr-imperative-manifestworks
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: ["work.open-cluster-management.io"]
+    resources: ["manifestworks"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: odoo-dr-imperative-manifestworks
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: odoo-dr-imperative-manifestworks
+subjects:
+  - kind: ServiceAccount
+    name: {{ .serviceAccount }}
+    namespace: {{ .serviceAccountNamespace }}
+{{- end }}
+{{- end }}

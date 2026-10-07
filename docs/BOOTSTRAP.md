@@ -1,5 +1,7 @@
 # Bootstrap
 
+> **Validated Patterns branch:** installation here is `./pattern.sh make install` (see the README's Install section). This document describes the `main` branch's Ansible + ApplicationSet layout; the parts about install phases 01–05, ApplicationSets and the Ansible vault do not apply on this branch. Day-two playbooks (preflight, diagnose, verify) still work.
+
 Deployment order, start to finish.
 
 The steps are grouped into phases because several of them **fail confusingly if run early**. Each phase notes what must be true before you move on, and which errors are expected rather than real.

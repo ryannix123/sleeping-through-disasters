@@ -1,0 +1,8 @@
+apiVersion: v2
+name: odoo-failover
+description: Tekton failover pipeline and optional Cloudflare triggers (passive site)
+type: application
+version: 0.1.0
+keywords:
+  - sleeping-through-disasters
+  - disaster-recovery

@@ -1,0 +1,51 @@
+# active  — the primary (initdb, local quorum-sync replica, replication role)
+# passive — a CNPG replica cluster streaming WAL across the Service
+#           Interconnect VAN from the active primary
+role: active
+
+namespace: odoo
+
+postgres:
+  image: ghcr.io/cloudnative-pg/postgresql:16.6
+
+  # Instances on the ACTIVE site. 2 gives quorum synchronous replication to a
+  # local replica (RPO 0 for a node or zone loss). The sno sizing profile sets 1.
+  instances: 2
+  # Instances on the PASSIVE site (the cross-cluster replica).
+  passiveInstances: 1
+
+  storage:
+    size: 20Gi
+    # Empty = the cluster's default StorageClass.
+    storageClass: ""
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+  parameters:
+    max_connections: "200"
+    shared_buffers: "512MB"
+    effective_cache_size: "1536MB"
+    work_mem: "16MB"
+    maintenance_work_mem: "256MB"
+    checkpoint_completion_target: "0.9"
+    wal_buffers: "16MB"
+    random_page_cost: "1.1"
+    effective_io_concurrency: "200"
+
+# The replication role's password, from Vault via External Secrets.
+# Same Vault path on both sites, so both clusters hold the same value.
+secretStore:
+  name: vault-backend
+  kind: ClusterSecretStore
+replicatorSecret:
+  key: secret/data/global/odoo-replicator
+  refreshInterval: 2m0s
+
+global:
+  pattern: sleeping-through-disasters

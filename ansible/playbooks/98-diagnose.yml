@@ -383,7 +383,7 @@
           - "passive  : connectors={{ p_conn }} listeners={{ p_lstn }} link={{ p_link }}"
           - "════════════ STORAGE ════════════"
           - "active   : {{ hostvars['active_site'].a_pvcs }}"
-          - "passive  : {{ p_pvcs }}   (odoo-data Pending is expected: WaitForFirstConsumer, binds on failover)"
+          - "passive  : {{ p_pvcs }}   (no odoo-data PVC on the passive site is expected: the failover pipeline builds it from the newest VolSync snapshot)"
 
     - name: Verdict
       ansible.builtin.assert:

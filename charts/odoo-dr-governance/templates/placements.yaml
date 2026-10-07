@@ -1,0 +1,52 @@
+---
+# Placements in this namespace may select from the "global" ManagedClusterSet,
+# which always contains every managed cluster (including local-cluster).
+apiVersion: cluster.open-cluster-management.io/v1beta2
+kind: ManagedClusterSetBinding
+metadata:
+  name: global
+  namespace: {{ .Values.policyNamespace }}
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  clusterSet: global
+{{- range $site, $sel := dict "active" .Values.activeSelector "passive" .Values.passiveSelector }}
+---
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: odoo-dr-{{ $site }}
+  namespace: {{ $.Values.policyNamespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+spec:
+  clusterSets:
+    - global
+  predicates:
+    - requiredClusterSelector:
+        labelSelector:
+          matchLabels:
+            {{- toYaml $sel | nindent 12 }}
+{{- end }}
+{{- range $binding := list (list "odoo-required-operators" "active") (list "odoo-required-operators" "passive") (list "odoo-standby-in-replica-mode" "passive") }}
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: {{ index $binding 0 }}-{{ index $binding 1 }}
+  namespace: {{ $.Values.policyNamespace }}
+  labels:
+    {{- include "odoo-dr.labels" $ | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
+placementRef:
+  name: odoo-dr-{{ index $binding 1 }}
+  apiGroup: cluster.open-cluster-management.io
+  kind: Placement
+subjects:
+  - name: {{ index $binding 0 }}
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy
+{{- end }}
