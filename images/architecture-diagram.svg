@@ -65,8 +65,8 @@
   <g id="hub" class="f">
     <rect x="990" y="78" width="360" height="80" rx="8" fill="#fdf2f2" stroke="#ee0000" stroke-width="1.5"/>
     <text x="1012" y="104" class="ct">Hub cluster</text>
-    <text x="1012" y="122" class="cs">Advanced Cluster Management — placement, policies, secrets</text>
-    <text x="1012" y="139" class="cs">OpenShift GitOps (Argo CD) — ApplicationSets to both sites</text>
+    <text x="1012" y="122" class="cs">Advanced Cluster Management — imports the active site</text>
+    <text x="1012" y="139" class="cs">Validated Patterns — clustergroup per site · Vault secrets</text>
   </g>
 
   <!-- ══════════════════════ CONNECTORS ══════════════════════ -->
@@ -150,7 +150,7 @@
 
     <g id="active-note">
       <text x="88" y="672" class="cs" fill="#6a6e73">Both clusters run the same operators, from the same Git repo,</text>
-      <text x="88" y="690" class="cs" fill="#6a6e73">placed by ACM. Neither is special. Either can play either role.</text>
+      <text x="88" y="690" class="cs" fill="#6a6e73">each pulling its own clustergroup. Either can play either role.</text>
     </g>
   </g>
 
@@ -208,7 +208,7 @@
     <rect x="790" y="250" width="560" height="6" rx="3" fill="#0066cc"/>
 
     <text x="810" y="284" class="hdr">PASSIVE — OpenShift single node, AWS</text>
-    <text x="810" y="303" class="hdrsub">Warm standby · also runs the ACM hub in this demo</text>
+    <text x="810" y="303" class="hdrsub">Warm standby · also the ACM hub (Vault, policies, the link job)</text>
 
     <g id="passive-app">
       <rect x="810" y="314" width="520" height="58" rx="6" fill="#ffffff" stroke="#d2d2d2" stroke-width="1.2"/>
@@ -242,7 +242,7 @@
       <rect x="810" y="582" width="520" height="58" rx="6" fill="#ffffff" stroke="#d2d2d2" stroke-width="1.2"/>
       <rect x="810" y="582" width="4" height="58" rx="2" fill="#0066cc"/>
       <text x="828" y="605" class="ct">OpenShift Pipelines — the failover run</text>
-      <text x="828" y="624" class="cs">Freeze GitOps → promote the database → restore the filestore → scale up → verify</text>
+      <text x="828" y="624" class="cs">Guard GitOps → promote the database → restore the filestore → scale up → verify</text>
     </g>
 
     <g id="passive-oadp">

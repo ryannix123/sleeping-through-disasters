@@ -1,0 +1,146 @@
+---
+title: Getting started
+weight: 10
+aliases: /sleeping-through-disasters/getting-started/
+---
+
+:toc:
+:imagesdir: /images
+:_content-type: ASSEMBLY
+include::modules/comm-attributes.adoc[]
+
+[id="deploying-sleeping-through-disasters"]
+== Deploying the Sleeping Through Disasters pattern
+
+.Prerequisites
+
+* Two {ocp} clusters, version 4.20 or later, ideally in different clouds or
+regions. One becomes the hub and the passive site; the other becomes the
+active site. Single-node {ocp} works for both.
+* The hub cluster must not already have {rh-rhacm} installed. The pattern
+installs it.
+* A GitHub account and a fork of the pattern repository.
+* Podman. For other installation tool dependencies, see
+link:https://validatedpatterns.io/learn/quickstart/[Patterns quick start].
+
+[id="preparing-for-deployment"]
+== Preparing for deployment
+.Procedure
+
+. Fork the link:https://github.com/ryannix123/sleeping-through-disasters[sleeping-through-disasters]
+repository on GitHub. You must fork the repository because your fork is
+updated as part of the GitOps processes.
+
+. Clone your fork and change to its directory:
++
+[source,terminal]
+----
+$ git clone git@github.com:your-username/sleeping-through-disasters.git
+$ cd sleeping-through-disasters
+----
+
+. Optional: if your clusters are single-node {ocp} or otherwise small, set the
+sizing profile in `values-global.yaml`:
++
+[source,yaml]
+----
+global:
+  odooDR:
+    sizing: sno
+----
+
+. Copy the secrets template outside the repository. Every secret is generated
+in {hashicorp-vault} unless you enable the optional Cloudflare integration:
++
+[source,terminal]
+----
+$ cp values-secret.yaml.template ~/values-secret-sleeping-through-disasters.yaml
+----
++
+[WARNING]
+====
+Do not commit this file. It must stay outside the repository.
+====
+
+. Commit and push any changes to your fork.
+
+[id="deploying-cluster-using-patternsh-file"]
+== Deploying the pattern
+.Procedure
+
+. Log in to the hub cluster and install the pattern:
++
+[source,terminal]
+----
+$ export KUBECONFIG=~/.kube/hub.config
+$ ./pattern.sh make install
+----
++
+This installs {rh-gitops}, {rh-rhacm}, {hashicorp-vault}, the {eso}, the
+operators the pattern uses, and the passive site's workloads, and loads the
+secrets into {hashicorp-vault}.
+
+. Import the active cluster into {rh-rhacm} with the `clusterGroup=active`
+label. Both kubeconfig files must be in your home directory:
++
+[source,terminal]
+----
+$ VP_HUBCONFIG=~/.kube/hub.config VP_SPOKECONFIG=~/.kube/active.config \
+    ./pattern.sh make import-active
+----
++
+{rh-rhacm} installs {rh-gitops-short} on the active cluster, which then deploys
+the active site: the operators, the PostgreSQL primary, the Service
+Interconnect site, VolSync, and Odoo.
+
+[id="verifying-deployment"]
+== Verifying the deployment
+
+. On the hub, confirm that the imperative jobs have linked the two sites. The
+`skupper-link` job runs every 10 minutes and links the sites as soon as both
+Service Interconnect sites are ready:
++
+[source,terminal]
+----
+$ oc get site -n odoo
+----
++
+The `SITES IN NETWORK` column shows `2` when the link is up.
+
+. Confirm that the passive database is a replica that is receiving data:
++
+[source,terminal]
+----
+$ oc get cluster.postgresql.cnpg.io odoo-db -n odoo
+----
+
+. Open Odoo on the active site through its route:
++
+[source,terminal]
+----
+$ oc get route odoo -n odoo --kubeconfig ~/.kube/active.config
+----
+
+For an end-to-end check that writes a probe row on the active database and
+confirms that it arrives on the passive database, run
+`ansible/playbooks/98-diagnose.yml` from the repository.
+
+[id="failing-over"]
+== Failing over
+
+The failover pipeline runs on the hub. By default it verifies that promotion
+is safe and stops, waiting for a person to confirm. To fail over by hand:
+
+[source,terminal]
+----
+$ tkn pipeline start dr-failover -n odoo -p source=manual -p auto_promote=true \
+    --use-param-defaults --serviceaccount dr-failover --showlog
+----
+
+The pipeline confirms that Argo CD will not revert the promotion, promotes the
+replica database, rebuilds the Odoo document volume from the newest VolSync
+snapshot, and scales Odoo up. Point users at the passive site's route, or
+enable the optional Cloudflare integration to move traffic automatically.
+
+For the full runbook, including returning to steady state after a test, see
+link:https://github.com/ryannix123/sleeping-through-disasters/blob/main/docs/FAILOVER.md[FAILOVER.md].

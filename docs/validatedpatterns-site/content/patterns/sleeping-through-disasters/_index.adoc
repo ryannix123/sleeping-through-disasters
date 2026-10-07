@@ -1,0 +1,122 @@
+---
+title: Sleeping Through Disasters
+date: 2026-10-07
+tier: sandbox
+summary: This pattern keeps a stateful business application, Odoo ERP, available through the loss of an entire region by replicating its database and documents continuously to a second OpenShift cluster in another cloud, then failing over with an automated, split-brain-safe pipeline.
+rh_products:
+- Red Hat OpenShift Container Platform
+- Red Hat Advanced Cluster Management
+- Red Hat OpenShift GitOps
+- Red Hat Service Interconnect
+- Red Hat OpenShift Pipelines
+- VolSync
+- Red Hat OpenShift API for Data Protection
+industries: []
+focus_areas:
+- Resilience
+- Data
+aliases: /sleeping-through-disasters/
+pattern_logo: sleeping-through-disasters.png
+links:
+  github: https://github.com/ryannix123/sleeping-through-disasters/
+  install: getting-started
+  bugs: https://github.com/ryannix123/sleeping-through-disasters/issues
+  feedback: https://github.com/ryannix123/sleeping-through-disasters/issues
+ci: sleeping-through-disasters
+---
+
+:toc:
+:imagesdir: /images
+:_content-type: ASSEMBLY
+include::modules/comm-attributes.adoc[]
+
+[id="about-sleeping-through-disasters"]
+== About the Sleeping Through Disasters pattern
+
+A firm's business of record, its ERP, has to stay available through the loss
+of an entire region, with its customer data, documents and configuration
+intact, at the lowest standby cost that meets the firm's availability target.
+
+This pattern does that for Odoo 19 Community, a production ERP and CRM backed
+by PostgreSQL. It runs Odoo on two {ocp} clusters, ideally in different clouds
+or regions. The active site serves users. The passive site holds a continuously
+replicated copy of both the database and the document store, with the
+application deployed but scaled to zero. On failover, a pipeline on the
+passive site promotes the database, restores the documents, and starts the
+application.
+
+=== Background
+
+Replicating a stateful application across clouds usually means stitching
+together a VPN, object storage, and hand-run promotion steps. This pattern
+replaces each of those:
+
+* The database and the document store both cross one Red{nbsp}Hat Service
+Interconnect virtual application network: mutual TLS, outbound connections
+only, no VPN and no public database port.
+* Documents replicate volume to volume with VolSync, so no object storage sits
+in the replication path.
+* Failover is a pipeline that requires two independent signals before it
+promotes: an unhealthy edge health check and a stalled write-ahead-log stream
+on the replica. A site that is merely unreachable from the edge is not
+promoted, which prevents split-brain.
+
+[id="about-solution-sleeping-through-disasters"]
+=== Solution elements
+
+* Two clustergroups. The hub runs {rh-rhacm} and {hashicorp-vault} and is also
+the passive site, so the cluster that survives a disaster is the one that
+runs the failover. The active site is a managed cluster that pulls its own
+configuration.
+* Two-tier PostgreSQL replication with CloudNativePG: synchronous to a replica
+in the active cluster (RPO 0 for a node or zone loss), asynchronous across the
+virtual application network to the passive site (seconds of RPO for a region
+loss).
+* Document replication with VolSync rsync-tls, using a pre-shared key that
+{hashicorp-vault} generates and the {eso} delivers to both sites.
+* An {rh-pipelines-first} failover pipeline with a human gate that can be
+switched off for fully automatic failover.
+* Promotion safety declared in Git: the passive site's Argo CD Applications
+ignore exactly the fields a failover changes, and the pipeline verifies this
+before it changes anything.
+* Imperative jobs that create the Service Interconnect link from the hub
+through {rh-rhacm} and repair known link faults automatically.
+* Optional automatic traffic failover with Cloudflare Load Balancing.
+
+[id="about-technology-sleeping-through-disasters"]
+=== Red Hat technologies
+
+* {rh-ocp}
+* {rh-rhacm-first}
+* {rh-gitops}
+* Red{nbsp}Hat Service Interconnect
+* {rh-pipelines-first}
+* VolSync
+* Red{nbsp}Hat OpenShift API for Data Protection
+* Red{nbsp}Hat Universal Base Image (the Odoo container image)
+
+=== Other technologies this pattern uses
+
+* CloudNativePG (a CNCF project), installed from the certified operator catalog
+* {hashicorp-vault} (Community Edition)
+* {eso}
+* Odoo 19 Community
+* Cloudflare Load Balancing (optional)
+
+[id="architecture-sleeping-through-disasters"]
+== Architecture
+
+.Sleeping Through Disasters architecture
+image::sleeping-through-disasters/architecture-diagram.png[Two OpenShift clusters: the active site replicates PostgreSQL and the Odoo filestore to the passive site over a Red Hat Service Interconnect mTLS virtual application network; the passive site also hosts the ACM hub and the failover pipeline]
+
+Recovery objectives measured on a fresh deployment:
+
+[cols="2,2,2",options="header"]
+|===
+| Scope | RPO | Recovery
+| Pod, node or zone failure | 0, synchronous replica | Seconds, automatic
+| Region loss, database | Seconds | Promotion completes in about 7 seconds
+| Region loss, documents | Up to the VolSync interval (2 minutes) | Restored from snapshot by the pipeline
+|===
+
+The pattern is supported on a best-effort basis by its maintainer.
